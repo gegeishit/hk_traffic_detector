@@ -64,6 +64,12 @@ ANNOTATION_COLORS = {
     "truck": (220, 38, 38),
     "motorcycle": (16, 185, 129),
 }
+ANNOTATION_SHORT_LABELS = {
+    "car": "Car",
+    "bus": "Bus",
+    "truck": "Truck",
+    "motorcycle": "Moto",
+}
 
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 50.0,
@@ -711,21 +717,19 @@ def annotate_image(
         ymin = box["ymin"]
         xmax = box["xmax"]
         ymax = box["ymax"]
-        label = detection["label"].title()
-        score = detection["score"]
-        caption = f"{label} {score:.2f}"
+        caption = ANNOTATION_SHORT_LABELS.get(detection["label"], detection["label"].title())
 
-        draw.rectangle((xmin, ymin, xmax, ymax), outline=color, width=3)
+        draw.rectangle((xmin, ymin, xmax, ymax), outline=color, width=2)
         if hasattr(draw, "textbbox"):
             text_bbox = draw.textbbox((xmin, ymin), caption, font=font)
         else:
             text_width, text_height = draw.textsize(caption, font=font)
             text_bbox = (xmin, ymin, xmin + text_width, ymin + text_height)
         background = (
-            text_bbox[0] - 2,
-            text_bbox[1] - 2,
-            text_bbox[2] + 2,
-            text_bbox[3] + 2,
+            text_bbox[0] - 1,
+            text_bbox[1] - 1,
+            text_bbox[2] + 1,
+            text_bbox[3] + 1,
         )
         draw.rectangle(background, fill=color)
         draw.text((xmin, ymin), caption, fill="white", font=font)
