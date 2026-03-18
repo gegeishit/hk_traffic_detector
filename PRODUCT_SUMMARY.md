@@ -129,7 +129,7 @@ Three product takeaways:
 ## Finetuning 
 
 1. Prepare training data: ~2000 snapshots from the used camera from Kaggle, ~3000 snapshots from other angles
-2. Auto label training data with PekingU/rtdetr_r50vd
+2. Auto label training data with PekingU/rtdetr_r50vd (https://colab.research.google.com/drive/1EO3V1frKYef9HzqQQt4swHTXYALB8lTm?usp=sharing)
 3. Clean up annotation in coco json file, with 5 labels remaining: car, bus, truck, motorcycle, person
 4. Finetuning of 25 epochs with microsoft/conditional-detr-resnet-50 and unlabelled snapshot images & annotation file
 5. Further finetuneing of 100 epochs with manually labelled & annotated snapshot images (~400) for calibration and enhanced accuracy (AI-assisted manual annotation tool on Roboflow: Segment Anything 3)
