@@ -9,16 +9,34 @@ Ref:
 - https://www.info.gov.hk/gia/general/202501/22/P2025012200478p.htm 
 - https://www.i-cable.com/%E6%96%B0%E8%81%9E%E8%B3%87%E8%A8%8A/424132/%E4%B8%80%E7%B7%9A%E6%90%9C%E6%9F%A5-%E4%B8%89%E9%9A%A7%E5%88%86%E6%B5%81%E5%B1%AF%E9%96%80%E7%84%A1%E8%91%97%E6%95%B8-%E6%89%93%E5%B7%A5%E4%BB%94%E9%80%9A%E5%8B%A4%E5%A4%9A45%E5%88%86 
 
-## Overview
+## App Feature
 
-This app monitors the three main Hong Kong harbour tunnels using live Transport Department CCTV images and official speed detector data. Its goal is to give a quick, side-specific view of tunnel conditions, including a simple traffic state label and an estimated crossing time.
+This app monitors the three main Hong Kong harbour tunnels using live Transport Department CCTV images and official speed detector data. Its goal is to give a quick, side-specific view of tunnel conditions, including a simple traffic state label and an estimated crossing time. 
 
-At a high level, the app combines two live signals:
+At a high level, the app combines two live signals: 
 
 - what the road looks like right now from CCTV
 - how fast traffic is officially moving right now from the Transport Department detector feed
 
 The result is a practical estimate for each tunnel direction rather than a perfect traffic simulation.
+
+## Model Selection Strategy 
+
+We compare three distinct Transformer-based pipelines to find the optimal balance of accuracy and runtime: 
+
+- PekingU/rtdetr_r50vd: A hybrid model optimized for real-time speed. 
+- microsoft/conditional-detr-resnet-50: Optimized for faster attention convergence – best results with the lowest loss, meaning the fewest mistakes in understanding images 
+- facebook/detr-resnet-50: The foundational baseline for Transformer object detection. 
+
+Experiment: https://colab.research.google.com/drive/14c50cbyXbDUn29HCkwhlJPWFCRMdxZg2?usp=sharing
+
+Experiment for the other pipeline that detects service unavailable screen: 
+
+- openai/clip-vit-base-patch32
+- laion/clip-vit-l-14-laion2b-s32b-b82k
+- google/siglip-base-patch16-224 – fastest runtime, results similar with the other 2 
+
+Experiment: https://colab.research.google.com/drive/12hHJvKs2EEN2_UZSBBvoHGbh7UKLTlQQ?usp=sharing
 
 ## Architecture and Data Flow
 
@@ -36,9 +54,9 @@ The app is built as a Streamlit dashboard. On each refresh cycle, it runs the fo
 
 The camera setup is intentionally simple:
 
-- Cross Harbour Tunnel and Eastern Harbour Crossing reuse one source image for both directions, but each side has its own ROI polygon.
-- Western Harbour Crossing uses separate images for each side.
-- Each side currently behaves like one active camera, so side state comes directly from that single camera rather than averaging multiple feeds.
+- Cross Harbour Tunnel uses 1 camera angle at Kowloon side entrance & exit to detect traffic from Kownloon & traffic from HK Island, but each side has its own ROI polygon. 
+- Eastern Harbour Crossing also uses 1 one camera angle at Kowloon side entrance & exit to detect traffic from Kownloon & traffic from HK Island, but each side has its own ROI polygon. 
+- Western Harbour Crossing uses separate images for the entrances at Kowloon side and HK Island side respectively, as the exit on either side is too far away from the camera for detection. Each side currently behaves like one active camera, so side state comes directly from that single camera rather than averaging multiple feeds. 
 
 There is also a visual enhancement layer:
 
@@ -107,3 +125,11 @@ Three product takeaways:
 - ETA combines an official live speed baseline with visible queueing from CCTV.
 - Flow labels depend on persistence, not just a one-frame spike.
 - ROI calibration matters, because only vehicles inside the road area count toward traffic state and ETA.
+
+## Finetuning 
+
+1. Prepare training data: ~2000 snapshots from the used camera from Kaggle, ~3000 snapshots from other angles
+2. Auto label training data with PekingU/rtdetr_r50vd
+3. Clean up annotation in coco json file, with 5 labels remaining: car, bus, truck, motorcycle, person
+4. Finetuning of 25 epochs with microsoft/conditional-detr-resnet-50 and unlabelled snapshot images & annotation file
+5. Further finetuneing of 100 epochs with manually labelled & annotated snapshot images (~400) for calibration and enhanced accuracy (AI-assisted manual annotation tool on Roboflow: Segment Anything 3)
