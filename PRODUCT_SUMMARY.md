@@ -1,5 +1,14 @@
 # Hong Kong Tunnel Traffic Monitor: Product Summary
 
+Company name: Transport Department
+
+After the introduction of time-varying tolls, peak traffic at the Western Harbour Crossing rose by about 20%, while the Cross-Harbour Tunnel and Eastern Harbour Crossing saw only modest reductions, resulting in more volatile tunnel demand. As the Department does not yet provide real-time tunnel traffic information, this project applies deep learning to detect vehicles at tunnel entrances/exits and deliver accurate, public-facing travel-time and congestion information. 
+
+Ref:  
+- https://www.legco.gov.hk/yr2024/english/panels/tp/papers/tp20240517cb4-584-3-e.pdf 
+- https://www.info.gov.hk/gia/general/202501/22/P2025012200478p.htm 
+- https://www.i-cable.com/%E6%96%B0%E8%81%9E%E8%B3%87%E8%A8%8A/424132/%E4%B8%80%E7%B7%9A%E6%90%9C%E6%9F%A5-%E4%B8%89%E9%9A%A7%E5%88%86%E6%B5%81%E5%B1%AF%E9%96%80%E7%84%A1%E8%91%97%E6%95%B8-%E6%89%93%E5%B7%A5%E4%BB%94%E9%80%9A%E5%8B%A4%E5%A4%9A45%E5%88%86 
+
 ## Overview
 
 This app monitors the three main Hong Kong harbour tunnels using live Transport Department CCTV images and official speed detector data. Its goal is to give a quick, side-specific view of tunnel conditions, including a simple traffic state label and an estimated crossing time.
