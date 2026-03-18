@@ -66,8 +66,8 @@ ANNOTATION_COLORS = {
 
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 50.0,
-    "Eastern Harbour Crossing": 70.0,
-    "Western Harbour Crossing": 70.0,
+    "Eastern Harbour Crossing": 50.0,
+    "Western Harbour Crossing": 50.0,
 }
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
@@ -421,11 +421,11 @@ def derive_camera_flow_metrics(
 
 
 def average_detector_speed_kmh(detector_element: ET.Element) -> float | None:
-    weighted_sum = 0.0
-    total_volume = 0.0
-    valid_lane_speeds: list[float] = []
-
     for lane_element in detector_element.findall("./lanes/lane"):
+        lane_name = (lane_element.findtext("lane_id") or "").strip().lower()
+        if "slow" not in lane_name:
+            continue
+
         valid_flag = (lane_element.findtext("valid") or "").strip().upper()
         if valid_flag != "Y":
             continue
@@ -434,17 +434,7 @@ def average_detector_speed_kmh(detector_element: ET.Element) -> float | None:
         if speed is None or speed <= 0:
             continue
 
-        valid_lane_speeds.append(speed)
-        volume = parse_float(lane_element.findtext("volume")) or 0.0
-        if volume > 0:
-            weighted_sum += speed * volume
-            total_volume += volume
-
-    if total_volume > 0:
-        return round(weighted_sum / total_volume, 2)
-
-    if valid_lane_speeds:
-        return round(sum(valid_lane_speeds) / len(valid_lane_speeds), 2)
+        return round(speed, 2)
 
     return None
 
