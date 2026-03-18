@@ -228,6 +228,8 @@ def load_service_screen_classifier() -> tuple[Any | None, str | None]:
             pipeline(
                 "zero-shot-image-classification",
                 model=SERVICE_CHECK_MODEL_ID,
+                device=-1,
+                model_kwargs={"low_cpu_mem_usage": True},
             ),
             None,
         )
@@ -239,7 +241,10 @@ def load_service_screen_classifier() -> tuple[Any | None, str | None]:
 def load_object_detector() -> tuple[Any | None, str | None]:
     try:
         processor = AutoImageProcessor.from_pretrained(DETECTOR_MODEL_ID, use_fast=False)
-        model = AutoModelForObjectDetection.from_pretrained(DETECTOR_MODEL_ID)
+        model = AutoModelForObjectDetection.from_pretrained(
+            DETECTOR_MODEL_ID,
+            low_cpu_mem_usage=True,
+        )
         model.eval()
         return (
             {
@@ -1295,6 +1300,20 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
                 f"Status: {status_text}</div>",
                 unsafe_allow_html=True,
             )
+            error_details = {
+                "Service-screen check": model_errors.get("service_classifier", "").strip(),
+                "Object detector": model_errors.get("detector", "").strip(),
+                "Speed baseline feed": model_errors.get("detector_feed", "").strip(),
+            }
+            visible_errors = {
+                label: detail
+                for label, detail in error_details.items()
+                if detail
+            }
+            if visible_errors:
+                with st.expander("Diagnostics", expanded=False):
+                    for label, detail in visible_errors.items():
+                        st.code(f"{label}: {detail}", language="text")
         with action_column:
             if st.button("Refresh data", use_container_width=True, type="secondary"):
                 download_image_bytes.clear()
