@@ -14,8 +14,8 @@ import requests
 import streamlit as st
 import torch
 from transformers import (
-    ConditionalDetrForObjectDetection,
-    ConditionalDetrImageProcessor,
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
     pipeline,
 )
 
@@ -32,7 +32,7 @@ IMAGE_CACHE_TTL_SECONDS = 60
 DETECTOR_FEED_CACHE_TTL_SECONDS = 60
 AUTO_REFRESH_INTERVAL_MS = 120_000
 DETECTOR_CONFIDENCE_THRESHOLD = 0.20
-DETECTOR_MODEL_ID = "microsoft/conditional-detr-resnet-50"
+DETECTOR_MODEL_ID = "Gegeishit/hk-traffic-detector-detr"
 TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 2 * 60
@@ -238,15 +238,12 @@ def load_service_screen_classifier() -> tuple[Any | None, str | None]:
 @st.cache_resource(show_spinner="Loading Conditional DETR detector...")
 def load_object_detector() -> tuple[Any | None, str | None]:
     try:
-        processor = ConditionalDetrImageProcessor.from_pretrained(
-            DETECTOR_MODEL_ID,
-            use_fast=False,
-        )
-        model = ConditionalDetrForObjectDetection.from_pretrained(DETECTOR_MODEL_ID)
+        processor = AutoImageProcessor.from_pretrained(DETECTOR_MODEL_ID, use_fast=False)
+        model = AutoModelForObjectDetection.from_pretrained(DETECTOR_MODEL_ID)
         model.eval()
         return (
             {
-                "kind": "conditional_detr",
+                "kind": "hf_object_detector",
                 "processor": processor,
                 "model": model,
             },
@@ -533,7 +530,7 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
         return []
 
     try:
-        if isinstance(detector, dict) and detector.get("kind") == "conditional_detr":
+        if isinstance(detector, dict) and detector.get("kind") == "hf_object_detector":
             processor = detector["processor"]
             model = detector["model"]
             model_device = next(model.parameters()).device

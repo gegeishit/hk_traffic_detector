@@ -1,8 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 altair==5.5.0
 pandas
 Pillow
 requests
 streamlit==1.55.0
 streamlit-autorefresh
-torch
+torch==2.10.0+cpu ; platform_system == "Linux"
+torch ; platform_system != "Linux"
 transformers==5.3.0
