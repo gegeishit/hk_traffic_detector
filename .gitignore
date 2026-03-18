@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+.venv/
+.streamlit/traffic_history.json
+
+runs/
+model_eval/
+data/
+weights/
+yolov8n.pt
+backup_app.py
+
+'

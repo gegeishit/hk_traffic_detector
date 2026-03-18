@@ -1,0 +1,8 @@
+altair
+pandas
+Pillow
+requests
+streamlit
+streamlit-autorefresh
+torch
+transformers==5.3.0
