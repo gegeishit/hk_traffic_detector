@@ -4,8 +4,10 @@ altair==5.5.0
 pandas
 Pillow
 requests
+sentencepiece
 streamlit==1.55.0
 streamlit-autorefresh
+timm
 torch==2.10.0+cpu ; platform_system == "Linux"
 torch ; platform_system != "Linux"
 transformers==5.3.0
