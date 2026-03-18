@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
@@ -63,10 +64,10 @@ ANNOTATION_COLORS = {
     "motorcycle": (16, 185, 129),
 }
 
-BASELINE_TRAVEL_SECONDS = {
-    "Cross Harbour Tunnel": 134,
-    "Eastern Harbour Crossing": 160,
-    "Western Harbour Crossing": 143,
+DEFAULT_BASELINE_SPEED_KMH = {
+    "Cross Harbour Tunnel": 50.0,
+    "Eastern Harbour Crossing": 70.0,
+    "Western Harbour Crossing": 70.0,
 }
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
@@ -101,6 +102,7 @@ MAX_EXTRA_DELAY_SECONDS = {
 RECENT_LOAD_WEIGHT = 0.2
 CURRENT_LOAD_WEIGHT = 0.8
 LARGE_VEHICLE_COUNT_PENALTY = 0.15
+HONG_KONG_TZ = ZoneInfo("Asia/Hong_Kong")
 
 CAMERA_SOURCE_URLS = {
     "K107F-KL2HK": "https://tdcctv.data.one.gov.hk/K107F.JPG",
@@ -777,17 +779,26 @@ def format_vehicle_type_counts(vehicle_counts: dict[str, int]) -> str:
     return ", ".join(f"{label} {count}" for label, count in ordered_counts)
 
 
+def fixed_baseline_seconds(tunnel: str) -> int:
+    default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
+    if default_speed_kmh <= 0:
+        return 0
+    return round((TUNNEL_LENGTHS_KM[tunnel] / default_speed_kmh) * 3600)
+
+
 def default_baseline_speed_kmh(tunnel: str) -> float:
-    baseline_seconds = BASELINE_TRAVEL_SECONDS[tunnel]
-    if baseline_seconds <= 0:
-        return 0.0
-    return round((TUNNEL_LENGTHS_KM[tunnel] * 3600) / baseline_seconds, 1)
+    return round(DEFAULT_BASELINE_SPEED_KMH[tunnel], 1)
 
 
 def baseline_caption(summary: dict[str, Any]) -> str:
-    if summary.get("baseline_source") == "dynamic" and summary.get("baseline_speed_kmh") is not None:
-        return f"Live speed: {summary['baseline_speed_kmh']:.1f}km/h"
-    return f"Default speed: {summary['default_baseline_speed_kmh']:.1f}km/h"
+    speed_kmh = (
+        summary.get("baseline_speed_kmh")
+        if summary.get("baseline_source") == "dynamic" and summary.get("baseline_speed_kmh") is not None
+        else summary.get("default_baseline_speed_kmh")
+    )
+    if speed_kmh is None:
+        return "Vehicle speed: N/A"
+    return f"Vehicle speed: {speed_kmh:.1f}km/h"
 
 
 def render_tags(tags: list[str]) -> None:
@@ -889,7 +900,7 @@ def summarize_side(
     available_records = [record for record in records if record["image"] is not None]
     analyzable_records = [record for record in available_records if record["analysis_enabled"]]
     calibrated_records = [record for record in analyzable_records if record["roi_configured"]]
-    fallback_baseline = BASELINE_TRAVEL_SECONDS[tunnel]
+    fallback_baseline = fixed_baseline_seconds(tunnel)
     default_speed_kmh = default_baseline_speed_kmh(tunnel)
     dynamic_baseline, baseline_detector_id, baseline_speed_kmh = dynamic_baseline_seconds(
         tunnel=tunnel,
@@ -1132,7 +1143,7 @@ def build_trend_dataframe(snapshot_time: float) -> pd.DataFrame:
     df["status_band"] = df["status_band"].fillna(-1)
     df["status_label"] = df["status_label"].fillna("No data")
     df["time_label"] = df["timestamp"].apply(
-        lambda ts: datetime.fromtimestamp(int(ts)).strftime("%H:%M")
+        lambda ts: datetime.fromtimestamp(int(ts), HONG_KONG_TZ).strftime("%H:%M")
     )
     return df
 
@@ -1564,7 +1575,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
         unsafe_allow_html=True,
     )
     st.caption(
-        f"Snapshot captured at {datetime.fromtimestamp(snapshot_time).strftime('%Y-%m-%d %H:%M:%S')} "
+        f"Snapshot captured at {datetime.fromtimestamp(snapshot_time, HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')} HKT "
         f"({'Auto refresh every 2 min' if st_autorefresh is not None else 'Auto refresh unavailable'})"
     )
     render_top_bar(snapshot_time, st.session_state.get("model_errors", {}), records_by_tunnel)
@@ -1608,16 +1619,13 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                         render_side_badge(summary["direction"], summary["status_icon"])
                         if summary["estimated_crossing_seconds"] is None:
                             st.metric("Est. crossing time", "N/A")
-                            st.caption(f"Default speed: {summary['default_baseline_speed_kmh']:.1f}km/h")
+                            st.caption(baseline_caption(summary))
                         else:
                             st.metric(
                                 "Est. crossing time",
                                 format_duration(summary["estimated_crossing_seconds"]),
                             )
-                            if has_analyzable_side_record:
-                                st.caption(baseline_caption(summary))
-                            else:
-                                st.caption(f"Default speed: {summary['default_baseline_speed_kmh']:.1f}km/h")
+                            st.caption(baseline_caption(summary))
 
                         if primary_record is None or primary_record["image"] is None:
                             st.write("**Side flow:** N/A  \n**Vehicles in ROI:** N/A")
