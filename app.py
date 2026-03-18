@@ -33,6 +33,7 @@ IMAGE_CACHE_TTL_SECONDS = 60
 DETECTOR_FEED_CACHE_TTL_SECONDS = 60
 AUTO_REFRESH_INTERVAL_MS = 120_000
 DETECTOR_CONFIDENCE_THRESHOLD = 0.20
+DETECTOR_NMS_IOU_THRESHOLD = 0.55
 DETECTOR_MODEL_ID = "Gegeishit/hk-traffic-detector-detr"
 TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
@@ -127,8 +128,8 @@ TUNNEL_LOGO_PATHS = {
 }
 
 ROI_CAPACITY_BY_CAMERA = {
-    "K107F-KL2HK": 50,
-    "K107F-HK2KL": 50,
+    "K107F-KL2HK": 90,
+    "K107F-HK2KL": 60,
     "K952F-KL2HK": 150,
     "K952F-HK2KL": 150,
     "H702F": 30,
@@ -603,7 +604,7 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
             }
         )
 
-    return detections
+    return dedupe_vehicle_detections(detections)
 
 def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]]) -> bool:
     x, y = point
@@ -624,6 +625,38 @@ def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]])
 
 def box_center(box: dict[str, int]) -> tuple[float, float]:
     return ((box["xmin"] + box["xmax"]) / 2.0, (box["ymin"] + box["ymax"]) / 2.0)
+
+
+def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
+    inter_xmin = max(box_a["xmin"], box_b["xmin"])
+    inter_ymin = max(box_a["ymin"], box_b["ymin"])
+    inter_xmax = min(box_a["xmax"], box_b["xmax"])
+    inter_ymax = min(box_a["ymax"], box_b["ymax"])
+
+    inter_width = max(inter_xmax - inter_xmin, 0)
+    inter_height = max(inter_ymax - inter_ymin, 0)
+    inter_area = inter_width * inter_height
+    if inter_area <= 0:
+        return 0.0
+
+    area_a = max(box_a["xmax"] - box_a["xmin"], 0) * max(box_a["ymax"] - box_a["ymin"], 0)
+    area_b = max(box_b["xmax"] - box_b["xmin"], 0) * max(box_b["ymax"] - box_b["ymin"], 0)
+    union_area = area_a + area_b - inter_area
+    if union_area <= 0:
+        return 0.0
+    return inter_area / union_area
+
+
+def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(detections) <= 1:
+        return detections
+
+    kept: list[dict[str, Any]] = []
+    for detection in sorted(detections, key=lambda item: item["score"], reverse=True):
+        if any(box_iou(detection["box"], existing["box"]) >= DETECTOR_NMS_IOU_THRESHOLD for existing in kept):
+            continue
+        kept.append(detection)
+    return kept
 
 
 def roi_for_camera(camera_id: str) -> list[tuple[int, int]]:
