@@ -72,10 +72,11 @@ ANNOTATION_SHORT_LABELS = {
 }
 
 DEFAULT_BASELINE_SPEED_KMH = {
-    "Cross Harbour Tunnel": 50.0,
-    "Eastern Harbour Crossing": 50.0,
-    "Western Harbour Crossing": 50.0,
+    "Cross Harbour Tunnel": 40.0,
+    "Eastern Harbour Crossing": 40.0,
+    "Western Harbour Crossing": 40.0,
 }
+LIVE_BASELINE_SPEED_WEIGHT = 0.35
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
     "Eastern Harbour Crossing": 2.2,
@@ -474,6 +475,7 @@ def dynamic_baseline_seconds(tunnel: str, side: str, detector_speed_map: dict[st
     detector_ids = BASELINE_DETECTOR_IDS[tunnel][side]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
+    default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
     available_speeds = [
         min(detector_speed_map[detector_id], speed_limit_kmh)
         for detector_id in detector_ids
@@ -482,16 +484,16 @@ def dynamic_baseline_seconds(tunnel: str, side: str, detector_speed_map: dict[st
     if not available_speeds:
         return None, ",".join(detector_ids), None
 
-    baseline_times = [
-        (tunnel_length_km / speed_kmh) * 3600
-        for speed_kmh in available_speeds
-        if speed_kmh > 0
-    ]
-    if not baseline_times:
+    live_speed_kmh = round(sum(available_speeds) / len(available_speeds), 1)
+    if live_speed_kmh <= 0:
         return None, ",".join(detector_ids), None
 
-    baseline_seconds = round(sum(baseline_times) / len(baseline_times))
-    baseline_speed = round(sum(available_speeds) / len(available_speeds), 1)
+    baseline_speed = round(
+        default_speed_kmh + (LIVE_BASELINE_SPEED_WEIGHT * (live_speed_kmh - default_speed_kmh)),
+        1,
+    )
+    baseline_speed = min(max(baseline_speed, 1.0), speed_limit_kmh)
+    baseline_seconds = round((tunnel_length_km / baseline_speed) * 3600)
     return baseline_seconds, ",".join(detector_ids), baseline_speed
 
 
