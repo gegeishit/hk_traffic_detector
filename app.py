@@ -75,11 +75,10 @@ ANNOTATION_MASK_ALPHA = 52
 ANNOTATION_MASK_CORE_ALPHA = 88
 
 DEFAULT_BASELINE_SPEED_KMH = {
-    "Cross Harbour Tunnel": 40.0,
-    "Eastern Harbour Crossing": 40.0,
-    "Western Harbour Crossing": 40.0,
+    "Cross Harbour Tunnel": 60.0,
+    "Eastern Harbour Crossing": 60.0,
+    "Western Harbour Crossing": 60.0,
 }
-LIVE_BASELINE_SPEED_WEIGHT = 0.35
 FLOW_STATE_LOAD_THRESHOLDS = {
     "busy_but_moving": 0.25,
     "slowing": 0.5,
@@ -445,17 +444,10 @@ def dynamic_baseline_seconds(tunnel: str, side: str, speed_map: dict[str, float]
     segment_id = BASELINE_SEGMENT_IDS[tunnel][side]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
-    default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
     live_speed_kmh = speed_map.get(segment_id)
     if live_speed_kmh is None or live_speed_kmh <= 0:
         return None, segment_id, None
-    live_speed_kmh = min(live_speed_kmh, speed_limit_kmh)
-
-    baseline_speed = round(
-        default_speed_kmh + (LIVE_BASELINE_SPEED_WEIGHT * (live_speed_kmh - default_speed_kmh)),
-        1,
-    )
-    baseline_speed = min(max(baseline_speed, 1.0), speed_limit_kmh)
+    baseline_speed = min(max(round(live_speed_kmh, 1), 1.0), speed_limit_kmh)
     baseline_seconds = round((tunnel_length_km / baseline_speed) * 3600)
     return baseline_seconds, segment_id, baseline_speed
 
@@ -804,8 +796,8 @@ def baseline_caption(summary: dict[str, Any]) -> str:
             else summary.get("default_baseline_speed_kmh")
         )
     if speed_kmh is None:
-        return "Vehicle speed: N/A"
-    return f"Vehicle speed: {speed_kmh:.1f}km/h"
+        return "Avg. traffic speed: N/A"
+    return f"Avg. traffic speed: {speed_kmh:.1f}km/h"
 
 
 def render_tags(tags: list[str]) -> None:
@@ -1307,11 +1299,12 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
         with status_column:
             service_message, service_color = service_classifier_status(records_by_tunnel)
             warnings = []
+            feed_warning = bool(model_errors.get("detector_feed"))
             if model_errors.get("service_classifier"):
                 warnings.append("Service-screen check unavailable")
             if model_errors.get("detector"):
                 warnings.append("Object detector unavailable")
-            if model_errors.get("detector_feed"):
+            if feed_warning:
                 warnings.append("Speed baseline feed unavailable")
             status_text = " | ".join(warnings) if warnings else service_message
             status_line_color = "#f6ad55" if warnings else service_color
@@ -1320,6 +1313,12 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
                 f"Status: {status_text}</div>",
                 unsafe_allow_html=True,
             )
+            if feed_warning:
+                st.markdown(
+                    "<div style='color:#f6ad55;font-size:0.96rem;font-weight:600;line-height:1.25;margin-top:0.15rem;'>"
+                    "Live speed data is currently not available.</div>",
+                    unsafe_allow_html=True,
+                )
             error_details = {
                 "Service-screen check": model_errors.get("service_classifier", "").strip(),
                 "Object detector": model_errors.get("detector", "").strip(),
