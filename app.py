@@ -5,7 +5,6 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import altair as alt
@@ -42,8 +41,8 @@ PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 BUSY_OCCUPANCY_THRESHOLD = 0.5
 SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
-TRAFFIC_DETECTOR_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/rawSpeedVol-all.xml"
-TRAFFIC_DETECTOR_HEADERS = {"User-Agent": "Mozilla/5.0"}
+TRAFFIC_SPEED_MAP_QUERY_URL = "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/ArcGIS/rest/services/TD_SpeedMap/FeatureServer/0/query"
+TRAFFIC_SPEED_MAP_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
 SERVICE_SCREEN_LABELS = {
     "a yellow no service warning screen": True,
@@ -65,11 +64,15 @@ ANNOTATION_COLORS = {
     "motorcycle": (16, 185, 129),
 }
 ANNOTATION_SHORT_LABELS = {
-    "car": "Car",
-    "bus": "Bus",
-    "truck": "Truck",
-    "motorcycle": "Moto",
+    "car": "C",
+    "bus": "B",
+    "truck": "T",
+    "motorcycle": "M",
 }
+ANNOTATION_BOX_ALPHA = 150
+ANNOTATION_LABEL_ALPHA = 128
+ANNOTATION_MASK_ALPHA = 52
+ANNOTATION_MASK_CORE_ALPHA = 88
 
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 40.0,
@@ -87,19 +90,10 @@ TUNNEL_SPEED_LIMITS_KMH = {
     "Eastern Harbour Crossing": 70.0,
     "Western Harbour Crossing": 70.0,
 }
-BASELINE_DETECTOR_IDS = {
-    "Cross Harbour Tunnel": {
-        "Hong Kong": ["AID01112"],
-        "Kowloon": ["AID01213"],
-    },
-    "Eastern Harbour Crossing": {
-        "Hong Kong": ["AID04222"],
-        "Kowloon": ["AID04222"],
-    },
-    "Western Harbour Crossing": {
-        "Hong Kong": ["AID03106"],
-        "Kowloon": ["AID03211"],
-    },
+BASELINE_SPEEDMAP_LINK_IDS = {
+    "Cross Harbour Tunnel": "46312-46319",
+    "Eastern Harbour Crossing": "46322-36511",
+    "Western Harbour Crossing": "3692-46332",
 }
 
 MAX_EXTRA_DELAY_SECONDS = {
@@ -280,14 +274,22 @@ def download_image_bytes(url: str) -> bytes:
 
 
 @st.cache_data(ttl=DETECTOR_FEED_CACHE_TTL_SECONDS, show_spinner=False)
-def download_detector_feed_xml() -> str:
+def download_speed_map_data() -> dict[str, Any]:
+    link_ids = sorted(BASELINE_SPEEDMAP_LINK_IDS.values())
+    quoted_ids = ",".join(f"'{link_id}'" for link_id in link_ids)
     response = requests.get(
-        TRAFFIC_DETECTOR_XML_URL,
+        TRAFFIC_SPEED_MAP_QUERY_URL,
         timeout=REQUEST_TIMEOUT_SECONDS,
-        headers=TRAFFIC_DETECTOR_HEADERS,
+        headers=TRAFFIC_SPEED_MAP_HEADERS,
+        params={
+            "where": f"LINK_ID IN ({quoted_ids})",
+            "outFields": "LINK_ID,TRAFFIC_SPEED,CAPTURE_DATE",
+            "returnGeometry": "false",
+            "f": "json",
+        },
     )
     response.raise_for_status()
-    return response.text
+    return response.json()
 
 
 def fetch_image(url: str) -> Image.Image | None:
@@ -428,65 +430,39 @@ def derive_camera_flow_metrics(
     }
 
 
-def average_detector_speed_kmh(detector_element: ET.Element) -> float | None:
-    for lane_element in detector_element.findall("./lanes/lane"):
-        lane_name = (lane_element.findtext("lane_id") or "").strip().lower()
-        if "slow" not in lane_name:
-            continue
-
-        valid_flag = (lane_element.findtext("valid") or "").strip().upper()
-        if valid_flag != "Y":
-            continue
-
-        speed = parse_float(lane_element.findtext("speed"))
-        if speed is None or speed <= 0:
-            continue
-
-        return round(speed, 2)
-
-    return None
-
-
-def load_detector_speed_map() -> tuple[dict[str, float], str | None]:
+def load_speed_map() -> tuple[dict[str, float], str | None]:
     try:
-        xml_text = download_detector_feed_xml()
-        root = ET.fromstring(xml_text)
-    except (requests.RequestException, ET.ParseError, OSError) as exc:
+        payload = download_speed_map_data()
+    except (requests.RequestException, OSError, ValueError) as exc:
         return {}, str(exc)
 
-    periods = root.findall("./periods/period")
-    if not periods:
-        return {}, "No detector periods found"
+    features = payload.get("features")
+    if not isinstance(features, list):
+        return {}, "No speed-map features found"
 
-    latest_period = periods[-1]
-    speed_by_detector: dict[str, float] = {}
-    for detector_element in latest_period.findall("./detectors/detector"):
-        detector_id = (detector_element.findtext("detector_id") or "").strip()
-        if not detector_id:
+    speed_by_link: dict[str, float] = {}
+    for feature in features:
+        attributes = feature.get("attributes", {}) if isinstance(feature, dict) else {}
+        link_id = str(attributes.get("LINK_ID", "") or "").strip()
+        if not link_id:
             continue
-        average_speed = average_detector_speed_kmh(detector_element)
-        if average_speed is not None:
-            speed_by_detector[detector_id] = average_speed
+        speed = parse_float(str(attributes.get("TRAFFIC_SPEED", "") or ""))
+        if speed is None or speed <= 0:
+            continue
+        speed_by_link[link_id] = round(speed, 2)
 
-    return speed_by_detector, None
+    return speed_by_link, None
 
 
-def dynamic_baseline_seconds(tunnel: str, side: str, detector_speed_map: dict[str, float]) -> tuple[int | None, str, float | None]:
-    detector_ids = BASELINE_DETECTOR_IDS[tunnel][side]
+def dynamic_baseline_seconds(tunnel: str, side: str, speed_map: dict[str, float]) -> tuple[int | None, str, float | None]:
+    link_id = BASELINE_SPEEDMAP_LINK_IDS[tunnel]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
     default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
-    available_speeds = [
-        min(detector_speed_map[detector_id], speed_limit_kmh)
-        for detector_id in detector_ids
-        if detector_id in detector_speed_map
-    ]
-    if not available_speeds:
-        return None, ",".join(detector_ids), None
-
-    live_speed_kmh = round(sum(available_speeds) / len(available_speeds), 1)
-    if live_speed_kmh <= 0:
-        return None, ",".join(detector_ids), None
+    live_speed_kmh = speed_map.get(link_id)
+    if live_speed_kmh is None or live_speed_kmh <= 0:
+        return None, link_id, None
+    live_speed_kmh = min(live_speed_kmh, speed_limit_kmh)
 
     baseline_speed = round(
         default_speed_kmh + (LIVE_BASELINE_SPEED_WEIGHT * (live_speed_kmh - default_speed_kmh)),
@@ -494,7 +470,7 @@ def dynamic_baseline_seconds(tunnel: str, side: str, detector_speed_map: dict[st
     )
     baseline_speed = min(max(baseline_speed, 1.0), speed_limit_kmh)
     baseline_seconds = round((tunnel_length_km / baseline_speed) * 3600)
-    return baseline_seconds, ",".join(detector_ids), baseline_speed
+    return baseline_seconds, link_id, baseline_speed
 
 
 def run_service_screen_check(img: Image.Image | None, classifier: Any | None) -> list[dict[str, Any]]:
@@ -708,11 +684,20 @@ def annotate_image(
     if not display_detections:
         return annotated.convert("RGB")
 
+    overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
     draw = ImageDraw.Draw(annotated)
-    font = ImageFont.load_default()
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 9)
+    except OSError:
+        font = ImageFont.load_default()
 
     for detection in display_detections:
         color = ANNOTATION_COLORS.get(detection["label"], (220, 38, 38))
+        box_color = (*color, ANNOTATION_BOX_ALPHA)
+        label_color = (*color, ANNOTATION_LABEL_ALPHA)
+        mask_color = (*color, ANNOTATION_MASK_ALPHA)
+        core_mask_color = (*color, ANNOTATION_MASK_CORE_ALPHA)
 
         box = detection["box"]
         xmin = box["xmin"]
@@ -721,7 +706,23 @@ def annotate_image(
         ymax = box["ymax"]
         caption = ANNOTATION_SHORT_LABELS.get(detection["label"], detection["label"].title())
 
-        draw.rectangle((xmin, ymin, xmax, ymax), outline=color, width=2)
+        box_width = max(xmax - xmin, 1)
+        box_height = max(ymax - ymin, 1)
+        corner_radius = max(4, min(box_width, box_height) // 6)
+        inset_x = max(1, box_width // 14)
+        inset_y = max(1, box_height // 18)
+        inner_box = (xmin + inset_x, ymin + inset_y, xmax - inset_x, ymax - inset_y)
+        core_top = ymin + max(2, int(box_height * 0.28))
+        core_box = (
+            xmin + max(1, int(box_width * 0.12)),
+            core_top,
+            xmax - max(1, int(box_width * 0.12)),
+            ymax - max(1, int(box_height * 0.08)),
+        )
+
+        overlay_draw.rounded_rectangle(inner_box, radius=corner_radius, fill=mask_color)
+        overlay_draw.rounded_rectangle(core_box, radius=max(3, corner_radius - 1), fill=core_mask_color)
+        overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=2)
         if hasattr(draw, "textbbox"):
             text_bbox = draw.textbbox((xmin, ymin), caption, font=font)
         else:
@@ -733,9 +734,10 @@ def annotate_image(
             text_bbox[2] + 1,
             text_bbox[3] + 1,
         )
-        draw.rectangle(background, fill=color)
-        draw.text((xmin, ymin), caption, fill="white", font=font)
+        overlay_draw.rectangle(background, fill=label_color)
+        draw.text((xmin, ymin), caption, fill=(255, 255, 255), font=font)
 
+    annotated = Image.alpha_composite(annotated, overlay)
     return annotated.convert("RGB")
 
 
@@ -1181,7 +1183,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
     service_classifier, service_classifier_error = load_service_screen_classifier()
     detector, detector_error = load_object_detector()
     detector_available = detector is not None
-    detector_speed_map, detector_feed_error = load_detector_speed_map()
+    detector_speed_map, detector_feed_error = load_speed_map()
 
     snapshot_time = datetime.now().timestamp()
     records_by_tunnel: dict[str, Any] = {}
@@ -1357,7 +1359,7 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
         with action_column:
             if st.button("Refresh data", use_container_width=True, type="secondary"):
                 download_image_bytes.clear()
-                download_detector_feed_xml.clear()
+                download_speed_map_data.clear()
                 st.rerun()
 
 
@@ -1611,7 +1613,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     render_trend_chart(snapshot_time)
 
     st.caption(
-        "Est. crossing time uses official detector speed as the baseline when available; otherwise the fixed tunnel baseline."
+        "Est. crossing time uses official traffic speed as the baseline when available; otherwise the fixed tunnel baseline."
     )
 
     for tunnel, side_map in TUNNELS.items():
