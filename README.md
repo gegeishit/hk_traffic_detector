@@ -121,6 +121,5 @@ streamlit run app.py
 ## Repo Notes
 
 - Main app: [app.py](/Users/alan/Desktop/hk_traffic_detector/app.py)
-- Product-facing summary: [PRODUCT_SUMMARY.md](/Users/alan/Desktop/hk_traffic_detector/PRODUCT_SUMMARY.md)
 
 This repository contains some experimental and historical assets as well. The live dashboard behavior is driven by `app.py`.
