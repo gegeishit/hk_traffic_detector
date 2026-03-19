@@ -5,6 +5,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import altair as alt
@@ -40,8 +41,8 @@ TREND_BUCKET_SECONDS = 2 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
-TRAFFIC_SPEED_MAP_QUERY_URL = "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/ArcGIS/rest/services/TD_SpeedMap/FeatureServer/0/query"
-TRAFFIC_SPEED_MAP_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
+TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
+TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
 SERVICE_SCREEN_LABELS = {
     "a yellow no service warning screen": True,
@@ -100,10 +101,19 @@ TUNNEL_SPEED_LIMITS_KMH = {
     "Eastern Harbour Crossing": 70.0,
     "Western Harbour Crossing": 70.0,
 }
-BASELINE_SPEEDMAP_LINK_IDS = {
-    "Cross Harbour Tunnel": "46312-46319",
-    "Eastern Harbour Crossing": "46322-36511",
-    "Western Harbour Crossing": "3692-46332",
+BASELINE_SEGMENT_IDS = {
+    "Cross Harbour Tunnel": {
+        "Hong Kong": "2905",
+        "Kowloon": "105057",
+    },
+    "Eastern Harbour Crossing": {
+        "Hong Kong": "101734",
+        "Kowloon": "101735",
+    },
+    "Western Harbour Crossing": {
+        "Hong Kong": "106784",
+        "Kowloon": "106785",
+    },
 }
 
 LARGE_VEHICLE_COUNT_PENALTY = 0.15
@@ -277,22 +287,14 @@ def download_image_bytes(url: str) -> bytes:
 
 
 @st.cache_data(ttl=DETECTOR_FEED_CACHE_TTL_SECONDS, show_spinner=False)
-def download_speed_map_data() -> dict[str, Any]:
-    link_ids = sorted(BASELINE_SPEEDMAP_LINK_IDS.values())
-    quoted_ids = ",".join(f"'{link_id}'" for link_id in link_ids)
+def download_segment_speed_xml() -> str:
     response = requests.get(
-        TRAFFIC_SPEED_MAP_QUERY_URL,
+        TRAFFIC_SEGMENT_SPEED_XML_URL,
         timeout=REQUEST_TIMEOUT_SECONDS,
-        headers=TRAFFIC_SPEED_MAP_HEADERS,
-        params={
-            "where": f"LINK_ID IN ({quoted_ids})",
-            "outFields": "LINK_ID,TRAFFIC_SPEED,CAPTURE_DATE",
-            "returnGeometry": "false",
-            "f": "json",
-        },
+        headers=TRAFFIC_SEGMENT_SPEED_HEADERS,
     )
     response.raise_for_status()
-    return response.json()
+    return response.text
 
 
 def fetch_image(url: str) -> Image.Image | None:
@@ -413,38 +415,40 @@ def derive_camera_flow_metrics(
     }
 
 
-def load_speed_map() -> tuple[dict[str, float], str | None]:
+def load_segment_speed_map() -> tuple[dict[str, float], str | None]:
     try:
-        payload = download_speed_map_data()
-    except (requests.RequestException, OSError, ValueError) as exc:
+        xml_text = download_segment_speed_xml()
+        root = ET.fromstring(xml_text)
+    except (requests.RequestException, ET.ParseError, OSError, ValueError) as exc:
         return {}, str(exc)
 
-    features = payload.get("features")
-    if not isinstance(features, list):
-        return {}, "No speed-map features found"
-
-    speed_by_link: dict[str, float] = {}
-    for feature in features:
-        attributes = feature.get("attributes", {}) if isinstance(feature, dict) else {}
-        link_id = str(attributes.get("LINK_ID", "") or "").strip()
-        if not link_id:
+    speed_by_segment: dict[str, float] = {}
+    for segment_element in root.findall(".//segment"):
+        segment_id = (segment_element.findtext("segment_id") or "").strip()
+        if not segment_id:
             continue
-        speed = parse_float(str(attributes.get("TRAFFIC_SPEED", "") or ""))
+        valid_flag = (segment_element.findtext("valid") or "").strip().upper()
+        if valid_flag and valid_flag != "Y":
+            continue
+        speed = parse_float(segment_element.findtext("speed"))
         if speed is None or speed <= 0:
             continue
-        speed_by_link[link_id] = round(speed, 2)
+        speed_by_segment[segment_id] = round(speed, 2)
 
-    return speed_by_link, None
+    if not speed_by_segment:
+        return {}, "No valid segment speeds found"
+
+    return speed_by_segment, None
 
 
 def dynamic_baseline_seconds(tunnel: str, side: str, speed_map: dict[str, float]) -> tuple[int | None, str, float | None]:
-    link_id = BASELINE_SPEEDMAP_LINK_IDS[tunnel]
+    segment_id = BASELINE_SEGMENT_IDS[tunnel][side]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
     default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
-    live_speed_kmh = speed_map.get(link_id)
+    live_speed_kmh = speed_map.get(segment_id)
     if live_speed_kmh is None or live_speed_kmh <= 0:
-        return None, link_id, None
+        return None, segment_id, None
     live_speed_kmh = min(live_speed_kmh, speed_limit_kmh)
 
     baseline_speed = round(
@@ -453,7 +457,7 @@ def dynamic_baseline_seconds(tunnel: str, side: str, speed_map: dict[str, float]
     )
     baseline_speed = min(max(baseline_speed, 1.0), speed_limit_kmh)
     baseline_seconds = round((tunnel_length_km / baseline_speed) * 3600)
-    return baseline_seconds, link_id, baseline_speed
+    return baseline_seconds, segment_id, baseline_speed
 
 
 def run_service_screen_check(img: Image.Image | None, classifier: Any | None) -> list[dict[str, Any]]:
@@ -1157,7 +1161,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
     service_classifier, service_classifier_error = load_service_screen_classifier()
     detector, detector_error = load_object_detector()
     detector_available = detector is not None
-    detector_speed_map, detector_feed_error = load_speed_map()
+    detector_speed_map, detector_feed_error = load_segment_speed_map()
 
     snapshot_time = datetime.now().timestamp()
     records_by_tunnel: dict[str, Any] = {}
@@ -1333,7 +1337,7 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
         with action_column:
             if st.button("Refresh data", use_container_width=True, type="secondary"):
                 download_image_bytes.clear()
-                download_speed_map_data.clear()
+                download_segment_speed_xml.clear()
                 st.rerun()
 
 
