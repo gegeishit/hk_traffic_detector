@@ -667,7 +667,7 @@ def annotate_image(
     overlay_draw = ImageDraw.Draw(overlay)
     draw = ImageDraw.Draw(annotated)
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 8)
+        font = ImageFont.truetype("DejaVuSans.ttf", 7)
     except OSError:
         font = ImageFont.load_default()
 
