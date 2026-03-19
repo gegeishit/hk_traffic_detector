@@ -904,7 +904,7 @@ def summarize_side(
     dynamic_baseline, baseline_detector_id, baseline_speed_kmh = dynamic_baseline_seconds(
         tunnel=tunnel,
         side=side,
-        detector_speed_map=detector_speed_map,
+        speed_map=detector_speed_map,
     )
     baseline = dynamic_baseline if dynamic_baseline is not None else fallback_baseline
     baseline_source = "dynamic" if dynamic_baseline is not None else "fallback"
