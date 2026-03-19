@@ -38,7 +38,6 @@ TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 2 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
-BUSY_OCCUPANCY_THRESHOLD = 0.5
 SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
 TRAFFIC_SPEED_MAP_QUERY_URL = "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/ArcGIS/rest/services/TD_SpeedMap/FeatureServer/0/query"
@@ -80,6 +79,17 @@ DEFAULT_BASELINE_SPEED_KMH = {
     "Western Harbour Crossing": 40.0,
 }
 LIVE_BASELINE_SPEED_WEIGHT = 0.35
+FLOW_STATE_LOAD_THRESHOLDS = {
+    "busy_but_moving": 0.25,
+    "slowing": 0.5,
+    "congested": 0.75,
+}
+FLOW_SPEED_FACTORS = {
+    "Clear": 1.0,
+    "Busy but moving": 0.75,
+    "Slowing": 0.5,
+    "Congested": 0.25,
+}
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
     "Eastern Harbour Crossing": 2.2,
@@ -96,13 +106,6 @@ BASELINE_SPEEDMAP_LINK_IDS = {
     "Western Harbour Crossing": "3692-46332",
 }
 
-MAX_EXTRA_DELAY_SECONDS = {
-    "Cross Harbour Tunnel": 480,
-    "Eastern Harbour Crossing": 420,
-    "Western Harbour Crossing": 360,
-}
-RECENT_LOAD_WEIGHT = 0.2
-CURRENT_LOAD_WEIGHT = 0.8
 LARGE_VEHICLE_COUNT_PENALTY = 0.15
 HONG_KONG_TZ = ZoneInfo("Asia/Hong_Kong")
 
@@ -389,43 +392,23 @@ def compute_camera_load(
     return round(min(max(count_score, 0.0), 1.0), 3)
 
 
-def count_persistent_high(history: list[dict[str, Any]], current_score: float, current_bucket: int) -> int:
-    if current_score < BUSY_OCCUPANCY_THRESHOLD:
-        return 0
-
-    count = 1
-    expected_timestamp = current_bucket - TREND_BUCKET_SECONDS
-    for entry in reversed(history):
-        if entry["timestamp"] != expected_timestamp:
-            break
-        if entry.get("camera_load", 0.0) < BUSY_OCCUPANCY_THRESHOLD:
-            break
-        count += 1
-        expected_timestamp -= TREND_BUCKET_SECONDS
-    return count
-
-
 def derive_camera_flow_metrics(
     camera_id: str,
     snapshot_time: float,
     on_road_vehicle_count: int,
     camera_load: float,
 ) -> dict[str, Any]:
-    current_bucket = bucket_timestamp(snapshot_time)
-    history = get_camera_flow_history(camera_id, current_bucket)
-    persistent_high_count = count_persistent_high(history, camera_load, current_bucket)
-
-    if on_road_vehicle_count == 0 or camera_load < BUSY_OCCUPANCY_THRESHOLD:
+    if on_road_vehicle_count == 0 or camera_load < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
         camera_flow_state = "Clear"
-    elif persistent_high_count >= 3:
+    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
         camera_flow_state = "Congested"
-    elif persistent_high_count >= 2:
+    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
         camera_flow_state = "Slowing"
     else:
         camera_flow_state = "Busy but moving"
 
     return {
-        "persistent_high_count": persistent_high_count,
+        "persistent_high_count": 0,
         "camera_flow_state": camera_flow_state,
     }
 
@@ -776,24 +759,11 @@ def ordered_sides(side_map: dict[str, Any]) -> list[str]:
     return sorted(side_map.keys(), key=lambda side: (side_order.get(side, 99), side))
 
 
-def estimate_delay_seconds(
-    tunnel: str,
-    current_load: float,
-    recent_load: float | None,
-    total_on_road_vehicle_count: int,
-) -> int:
-    if total_on_road_vehicle_count == 0 or current_load < BUSY_OCCUPANCY_THRESHOLD:
-        return 0
-
-    smoothed_load = (
-        (CURRENT_LOAD_WEIGHT * current_load) + (RECENT_LOAD_WEIGHT * recent_load)
-        if recent_load is not None
-        else current_load
-    )
-    effective_load = min(max(smoothed_load, 0.0), 1.0)
-    normalized_load = min(max((effective_load - BUSY_OCCUPANCY_THRESHOLD) / (1.0 - BUSY_OCCUPANCY_THRESHOLD), 0.0), 1.0)
-    delay = (normalized_load ** 1.15) * MAX_EXTRA_DELAY_SECONDS[tunnel]
-    return int(round(min(delay, MAX_EXTRA_DELAY_SECONDS[tunnel])))
+def effective_speed_kmh(base_speed_kmh: float | None, flow_label: str) -> float | None:
+    if base_speed_kmh is None or base_speed_kmh <= 0:
+        return None
+    speed_factor = FLOW_SPEED_FACTORS.get(flow_label, 1.0)
+    return round(max(base_speed_kmh * speed_factor, 5.0), 1)
 
 
 def format_duration(seconds: int | None) -> str:
@@ -822,11 +792,13 @@ def default_baseline_speed_kmh(tunnel: str) -> float:
 
 
 def baseline_caption(summary: dict[str, Any]) -> str:
-    speed_kmh = (
-        summary.get("baseline_speed_kmh")
-        if summary.get("baseline_source") == "dynamic" and summary.get("baseline_speed_kmh") is not None
-        else summary.get("default_baseline_speed_kmh")
-    )
+    speed_kmh = summary.get("effective_speed_kmh")
+    if speed_kmh is None:
+        speed_kmh = (
+            summary.get("baseline_speed_kmh")
+            if summary.get("baseline_source") == "dynamic" and summary.get("baseline_speed_kmh") is not None
+            else summary.get("default_baseline_speed_kmh")
+        )
     if speed_kmh is None:
         return "Vehicle speed: N/A"
     return f"Vehicle speed: {speed_kmh:.1f}km/h"
@@ -1023,20 +995,21 @@ def summarize_side(
 
     primary_record = calibrated_records[0]
     current_load = float(primary_record["camera_load"])
-    recent_load = (
-        float(primary_record["recent_camera_load"])
-        if primary_record.get("recent_camera_load") is not None
-        else None
-    )
     total_on_road_vehicle_count = int(primary_record["on_road_vehicle_count"])
     average_on_road_vehicle_count = float(total_on_road_vehicle_count)
     flow_label = str(primary_record["camera_flow_state"])
     eta_confidence = "provisional" if flow_label == "Busy but moving" else "confirmed"
-    extra_delay_seconds = estimate_delay_seconds(
-        tunnel=tunnel,
-        current_load=current_load,
-        recent_load=recent_load,
-        total_on_road_vehicle_count=total_on_road_vehicle_count,
+    base_speed_kmh = baseline_speed_kmh if baseline_speed_kmh is not None else default_speed_kmh
+    adjusted_speed_kmh = effective_speed_kmh(base_speed_kmh, flow_label)
+    estimated_crossing_seconds = (
+        round((TUNNEL_LENGTHS_KM[tunnel] / adjusted_speed_kmh) * 3600)
+        if adjusted_speed_kmh is not None
+        else None
+    )
+    extra_delay_seconds = (
+        max(int(estimated_crossing_seconds - baseline), 0)
+        if estimated_crossing_seconds is not None
+        else None
     )
 
     return {
@@ -1047,8 +1020,9 @@ def summarize_side(
         "baseline_detector_id": baseline_detector_id,
         "baseline_speed_kmh": baseline_speed_kmh,
         "default_baseline_speed_kmh": default_speed_kmh,
+        "effective_speed_kmh": adjusted_speed_kmh,
         "extra_delay_seconds": extra_delay_seconds,
-        "estimated_crossing_seconds": baseline + extra_delay_seconds,
+        "estimated_crossing_seconds": estimated_crossing_seconds,
         "status_label": flow_label,
         "status_icon": icon_for_flow_label(flow_label),
         "flow_label": flow_label,
@@ -1613,7 +1587,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     render_trend_chart(snapshot_time)
 
     st.caption(
-        "Est. crossing time uses official traffic speed as the baseline when available; otherwise the fixed tunnel baseline."
+        "Est. crossing time is calculated from tunnel length and vehicle speed, with camera-derived traffic flow reducing speed when the approach looks crowded."
     )
 
     for tunnel, side_map in TUNNELS.items():
