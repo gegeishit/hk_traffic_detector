@@ -665,6 +665,7 @@ def annotate_image(
 
     overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
+    label_draw_instructions: list[tuple[tuple[int, int], str]] = []
     draw = ImageDraw.Draw(annotated)
     try:
         font = ImageFont.truetype("DejaVuSans.ttf", 7)
@@ -714,9 +715,12 @@ def annotate_image(
             text_bbox[3],
         )
         overlay_draw.rectangle(background, fill=label_color)
-        draw.text((xmin, ymin), caption, fill=(255, 255, 255), font=font)
+        label_draw_instructions.append(((xmin, ymin), caption))
 
     annotated = Image.alpha_composite(annotated, overlay)
+    final_draw = ImageDraw.Draw(annotated)
+    for position, caption in label_draw_instructions:
+        final_draw.text(position, caption, fill=(255, 255, 255), font=font)
     return annotated.convert("RGB")
 
 
