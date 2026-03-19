@@ -64,10 +64,10 @@ ANNOTATION_COLORS = {
     "motorcycle": (16, 185, 129),
 }
 ANNOTATION_SHORT_LABELS = {
-    "car": "C",
-    "bus": "B",
-    "truck": "T",
-    "motorcycle": "M",
+    "car": "car",
+    "bus": "bus",
+    "truck": "truck",
+    "motorcycle": "motorcycle",
 }
 ANNOTATION_BOX_ALPHA = 150
 ANNOTATION_LABEL_ALPHA = 128
@@ -667,7 +667,7 @@ def annotate_image(
     overlay_draw = ImageDraw.Draw(overlay)
     draw = ImageDraw.Draw(annotated)
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 9)
+        font = ImageFont.truetype("DejaVuSans.ttf", 8)
     except OSError:
         font = ImageFont.load_default()
 
@@ -708,10 +708,10 @@ def annotate_image(
             text_width, text_height = draw.textsize(caption, font=font)
             text_bbox = (xmin, ymin, xmin + text_width, ymin + text_height)
         background = (
-            text_bbox[0] - 1,
-            text_bbox[1] - 1,
+            text_bbox[0],
+            text_bbox[1],
             text_bbox[2] + 1,
-            text_bbox[3] + 1,
+            text_bbox[3],
         )
         overlay_draw.rectangle(background, fill=label_color)
         draw.text((xmin, ymin), caption, fill=(255, 255, 255), font=font)
