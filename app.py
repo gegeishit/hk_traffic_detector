@@ -79,6 +79,8 @@ ANNOTATION_BOX_ALPHA = 150
 ANNOTATION_LABEL_ALPHA = 128
 ANNOTATION_MASK_ALPHA = 52
 ANNOTATION_MASK_CORE_ALPHA = 88
+MASK_CORRECTION_KERNEL_SIZE = 5
+MASK_CORRECTION_ITERATIONS = 1
 
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 60.0,
@@ -736,6 +738,22 @@ def segment_detection_mask(
     return full_mask
 
 
+def apply_mask_correction(mask: np.ndarray) -> np.ndarray:
+    if cv2 is None or not np.any(mask):
+        return mask
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (MASK_CORRECTION_KERNEL_SIZE, MASK_CORRECTION_KERNEL_SIZE),
+    )
+    corrected_mask = cv2.dilate(
+        mask.astype(np.uint8),
+        kernel,
+        iterations=MASK_CORRECTION_ITERATIONS,
+    )
+    return corrected_mask.astype(bool)
+
+
 def compute_segmentation_occupancy_ratio(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
@@ -758,7 +776,7 @@ def compute_segmentation_occupancy_ratio(
         detection_mask = segment_detection_mask(image_bgr, detection["box"])
         if detection_mask is None:
             continue
-        vehicle_mask |= detection_mask
+        vehicle_mask |= apply_mask_correction(detection_mask)
         any_segmented = True
 
     if not any_segmented:
