@@ -9,6 +9,11 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import altair as alt
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional until dependency is installed
+    cv2 = None
+import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 import requests
@@ -378,13 +383,22 @@ def is_large_vehicle_spike(
 
 
 def compute_camera_load(
+    image: Image.Image | None,
+    polygon: list[tuple[int, int]],
     camera_capacity: int | None,
+    on_road_detections: list[dict[str, Any]],
     on_road_vehicle_count: int,
     large_vehicle_spike_flag: bool,
-    roi_configured: bool,
     detector_available: bool,
 ) -> float:
-    if not roi_configured or not detector_available or not camera_capacity or on_road_vehicle_count == 0:
+    if not polygon or not detector_available or on_road_vehicle_count == 0:
+        return 0.0
+
+    occupancy_ratio = compute_segmentation_occupancy_ratio(image, polygon, on_road_detections)
+    if occupancy_ratio is not None:
+        return occupancy_ratio
+
+    if not camera_capacity:
         return 0.0
 
     count_score = min(on_road_vehicle_count / camera_capacity, 1.0)
@@ -440,16 +454,21 @@ def load_segment_speed_map() -> tuple[dict[str, float], str | None]:
     return speed_by_segment, None
 
 
-def dynamic_baseline_seconds(tunnel: str, side: str, speed_map: dict[str, float]) -> tuple[int | None, str, float | None]:
+def dynamic_baseline_seconds(
+    tunnel: str,
+    side: str,
+    speed_map: dict[str, float],
+) -> tuple[int | None, str, float | None, float | None]:
     segment_id = BASELINE_SEGMENT_IDS[tunnel][side]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
     live_speed_kmh = speed_map.get(segment_id)
     if live_speed_kmh is None or live_speed_kmh <= 0:
-        return None, segment_id, None
-    baseline_speed = min(max(round(live_speed_kmh, 1), 1.0), speed_limit_kmh)
+        return None, segment_id, None, None
+    fetched_speed_kmh = round(live_speed_kmh, 1)
+    baseline_speed = min(max(fetched_speed_kmh, 1.0), speed_limit_kmh)
     baseline_seconds = round((tunnel_length_km / baseline_speed) * 3600)
-    return baseline_seconds, segment_id, baseline_speed
+    return baseline_seconds, segment_id, baseline_speed, fetched_speed_kmh
 
 
 def run_service_screen_check(img: Image.Image | None, classifier: Any | None) -> list[dict[str, Any]]:
@@ -610,6 +629,145 @@ def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
     return inter_area / union_area
 
 
+def clip_box_to_image(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    image_width, image_height = image_size
+    xmin = max(0, min(int(box["xmin"]), image_width - 1))
+    ymin = max(0, min(int(box["ymin"]), image_height - 1))
+    xmax = max(xmin + 1, min(int(box["xmax"]), image_width))
+    ymax = max(ymin + 1, min(int(box["ymax"]), image_height))
+    if xmax <= xmin or ymax <= ymin:
+        return None
+    return {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+
+
+def expand_box(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+    margin_ratio: float = 0.12,
+    min_margin_px: int = 4,
+) -> dict[str, int] | None:
+    clipped_box = clip_box_to_image(box, image_size)
+    if clipped_box is None:
+        return None
+    box_width = clipped_box["xmax"] - clipped_box["xmin"]
+    box_height = clipped_box["ymax"] - clipped_box["ymin"]
+    margin_x = max(min_margin_px, int(box_width * margin_ratio))
+    margin_y = max(min_margin_px, int(box_height * margin_ratio))
+    return clip_box_to_image(
+        {
+            "xmin": clipped_box["xmin"] - margin_x,
+            "ymin": clipped_box["ymin"] - margin_y,
+            "xmax": clipped_box["xmax"] + margin_x,
+            "ymax": clipped_box["ymax"] + margin_y,
+        },
+        image_size,
+    )
+
+
+def polygon_mask(
+    image_size: tuple[int, int],
+    polygon: list[tuple[int, int]],
+) -> np.ndarray | None:
+    if cv2 is None or len(polygon) < 3:
+        return None
+    image_width, image_height = image_size
+    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    points = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(mask, [points], 1)
+    return mask.astype(bool)
+
+
+def segment_detection_mask(
+    image_bgr: np.ndarray,
+    box: dict[str, int],
+) -> np.ndarray | None:
+    if cv2 is None:
+        return None
+
+    image_height, image_width = image_bgr.shape[:2]
+    expanded_box = expand_box(box, (image_width, image_height))
+    clipped_box = clip_box_to_image(box, (image_width, image_height))
+    if expanded_box is None or clipped_box is None:
+        return None
+
+    crop = image_bgr[
+        expanded_box["ymin"]:expanded_box["ymax"],
+        expanded_box["xmin"]:expanded_box["xmax"],
+    ]
+    if crop.size == 0:
+        return None
+
+    rect_x = clipped_box["xmin"] - expanded_box["xmin"]
+    rect_y = clipped_box["ymin"] - expanded_box["ymin"]
+    rect_w = clipped_box["xmax"] - clipped_box["xmin"]
+    rect_h = clipped_box["ymax"] - clipped_box["ymin"]
+    if rect_w <= 2 or rect_h <= 2:
+        return None
+
+    grabcut_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+    bg_model = np.zeros((1, 65), np.float64)
+    fg_model = np.zeros((1, 65), np.float64)
+
+    try:
+        cv2.grabCut(
+            crop,
+            grabcut_mask,
+            (rect_x, rect_y, rect_w, rect_h),
+            bg_model,
+            fg_model,
+            1,
+            cv2.GC_INIT_WITH_RECT,
+        )
+    except cv2.error:
+        return None
+
+    foreground = np.isin(grabcut_mask, (cv2.GC_FGD, cv2.GC_PR_FGD))
+    if not foreground.any():
+        return None
+
+    full_mask = np.zeros((image_height, image_width), dtype=bool)
+    full_mask[
+        expanded_box["ymin"]:expanded_box["ymax"],
+        expanded_box["xmin"]:expanded_box["xmax"],
+    ] = foreground
+    return full_mask
+
+
+def compute_segmentation_occupancy_ratio(
+    image: Image.Image | None,
+    polygon: list[tuple[int, int]],
+    detections: list[dict[str, Any]],
+) -> float | None:
+    if cv2 is None or image is None or not polygon or not detections:
+        return None
+
+    roi_mask = polygon_mask(image.size, polygon)
+    if roi_mask is None:
+        return None
+    roi_area = int(np.count_nonzero(roi_mask))
+    if roi_area <= 0:
+        return None
+
+    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    vehicle_mask = np.zeros(roi_mask.shape, dtype=bool)
+    any_segmented = False
+    for detection in detections:
+        detection_mask = segment_detection_mask(image_bgr, detection["box"])
+        if detection_mask is None:
+            continue
+        vehicle_mask |= detection_mask
+        any_segmented = True
+
+    if not any_segmented:
+        return None
+
+    occupied_pixels = int(np.count_nonzero(vehicle_mask & roi_mask))
+    return round(min(max(occupied_pixels / roi_area, 0.0), 1.0), 3)
+
+
 def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(detections) <= 1:
         return detections
@@ -727,10 +885,12 @@ def annotate_image(
 def icon_for_flow_label(flow_label: str) -> str:
     if flow_label in {"No data", "Uncalibrated", "No road data"}:
         return "❓"
-    if flow_label in {"Clear", "Busy but moving"}:
+    if flow_label == "Clear":
         return "🟢"
-    if flow_label == "Slowing":
+    if flow_label == "Busy but moving":
         return "🟡"
+    if flow_label == "Slowing":
+        return "🟠"
     return "🔴"
 
 
@@ -792,13 +952,11 @@ def default_baseline_speed_kmh(tunnel: str) -> float:
 
 
 def baseline_caption(summary: dict[str, Any]) -> str:
-    speed_kmh = summary.get("effective_speed_kmh")
-    if speed_kmh is None:
-        speed_kmh = (
-            summary.get("baseline_speed_kmh")
-            if summary.get("baseline_source") == "dynamic" and summary.get("baseline_speed_kmh") is not None
-            else summary.get("default_baseline_speed_kmh")
-        )
+    speed_kmh = (
+        summary.get("fetched_speed_kmh")
+        if summary.get("baseline_source") == "dynamic" and summary.get("fetched_speed_kmh") is not None
+        else summary.get("default_baseline_speed_kmh")
+    )
     if speed_kmh is None:
         return "Avg. traffic speed: N/A"
     return f"Avg. traffic speed: {speed_kmh:.1f}km/h"
@@ -905,7 +1063,7 @@ def summarize_side(
     calibrated_records = [record for record in analyzable_records if record["roi_configured"]]
     fallback_baseline = fixed_baseline_seconds(tunnel)
     default_speed_kmh = default_baseline_speed_kmh(tunnel)
-    dynamic_baseline, baseline_detector_id, baseline_speed_kmh = dynamic_baseline_seconds(
+    dynamic_baseline, baseline_detector_id, baseline_speed_kmh, fetched_speed_kmh = dynamic_baseline_seconds(
         tunnel=tunnel,
         side=side,
         speed_map=detector_speed_map,
@@ -921,6 +1079,7 @@ def summarize_side(
             "baseline_source": baseline_source,
             "baseline_detector_id": baseline_detector_id,
             "baseline_speed_kmh": baseline_speed_kmh,
+            "fetched_speed_kmh": fetched_speed_kmh,
             "default_baseline_speed_kmh": default_speed_kmh,
             "extra_delay_seconds": None,
             "estimated_crossing_seconds": None,
@@ -941,6 +1100,7 @@ def summarize_side(
             "baseline_source": baseline_source,
             "baseline_detector_id": baseline_detector_id,
             "baseline_speed_kmh": baseline_speed_kmh,
+            "fetched_speed_kmh": fetched_speed_kmh,
             "default_baseline_speed_kmh": default_speed_kmh,
             "extra_delay_seconds": None,
             "estimated_crossing_seconds": None,
@@ -961,6 +1121,7 @@ def summarize_side(
             "baseline_source": baseline_source,
             "baseline_detector_id": baseline_detector_id,
             "baseline_speed_kmh": baseline_speed_kmh,
+            "fetched_speed_kmh": fetched_speed_kmh,
             "default_baseline_speed_kmh": default_speed_kmh,
             "extra_delay_seconds": None,
             "estimated_crossing_seconds": None,
@@ -981,6 +1142,7 @@ def summarize_side(
             "baseline_source": baseline_source,
             "baseline_detector_id": baseline_detector_id,
             "baseline_speed_kmh": baseline_speed_kmh,
+            "fetched_speed_kmh": fetched_speed_kmh,
             "default_baseline_speed_kmh": default_speed_kmh,
             "extra_delay_seconds": None,
             "estimated_crossing_seconds": None,
@@ -1019,6 +1181,7 @@ def summarize_side(
         "baseline_source": baseline_source,
         "baseline_detector_id": baseline_detector_id,
         "baseline_speed_kmh": baseline_speed_kmh,
+        "fetched_speed_kmh": fetched_speed_kmh,
         "default_baseline_speed_kmh": default_speed_kmh,
         "effective_speed_kmh": adjusted_speed_kmh,
         "extra_delay_seconds": extra_delay_seconds,
@@ -1181,7 +1344,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
                 camera_capacity = ROI_CAPACITY_BY_CAMERA.get(camera_id)
-                capacity_configured = camera_capacity is not None and camera_capacity > 0
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
@@ -1192,9 +1354,11 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 )
                 camera_load = (
                     compute_camera_load(
+                        image=image,
+                        polygon=polygon,
                         camera_capacity=camera_capacity,
+                        on_road_detections=on_road_detections,
                         large_vehicle_spike_flag=large_vehicle_spike_flag,
-                        roi_configured=roi_configured and capacity_configured,
                         detector_available=detector_available,
                         on_road_vehicle_count=len(on_road_detections),
                     )
@@ -1247,7 +1411,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "on_road_vehicle_types": on_road_vehicle_types,
                         "camera_load": camera_load,
                         "recent_camera_load": recent_camera_load,
-                        "roi_configured": roi_configured and capacity_configured,
+                        "roi_configured": roi_configured,
                         **camera_flow_metrics,
                     }
                 )

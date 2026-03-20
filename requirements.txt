@@ -1,6 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 altair==5.5.0
+opencv-python-headless
 pandas
 Pillow
 requests
