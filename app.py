@@ -1347,17 +1347,15 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
     service_classifier, service_classifier_error = load_service_screen_classifier()
     detector, detector_error = load_object_detector()
     detector_available = detector is not None
-    detector_speed_map, detector_feed_error = load_segment_speed_map()
 
     snapshot_time = datetime.now().timestamp()
     records_by_tunnel: dict[str, Any] = {}
     tunnel_metrics: dict[str, Any] = {}
+    tunnel_active_camera_counts: dict[str, int] = {}
 
     for tunnel, sides in TUNNELS.items():
         side_records: dict[str, Any] = {}
-        side_summaries: dict[str, Any] = {}
         active_cameras = 0
-        tunnel_camera_scores: list[float] = []
 
         for side, camera_ids in sides.items():
             camera_records = []
@@ -1444,6 +1442,16 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 )
 
             side_records[side] = camera_records
+        records_by_tunnel[tunnel] = side_records
+        tunnel_active_camera_counts[tunnel] = active_cameras
+
+    detector_speed_map, detector_feed_error = load_segment_speed_map()
+
+    for tunnel, side_records in records_by_tunnel.items():
+        side_summaries: dict[str, Any] = {}
+        tunnel_camera_scores: list[float] = []
+
+        for side, camera_records in side_records.items():
             side_summaries[side] = summarize_side(
                 tunnel=tunnel,
                 side=side,
@@ -1470,11 +1478,10 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
             if tunnel_camera_scores
             else None
         )
-        records_by_tunnel[tunnel] = side_records
         tunnel_metrics[tunnel] = {
             "status_label": trend_status_label if trend_status_label is not None else "No calibrated road data",
             "status_icon": icon_for_flow_label(trend_status_label or "No road data"),
-            "active_cameras": active_cameras,
+            "active_cameras": tunnel_active_camera_counts[tunnel],
             "trend_status_label": trend_status_label,
             "trend_status_band": trend_status_band,
             "tunnel_load": round(tunnel_score, 3) if tunnel_score is not None else None,
