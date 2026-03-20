@@ -1812,8 +1812,15 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             if primary_record["service_check_result"]:
                                 st.caption(f"Feed check: {primary_record['service_check_result']}")
                         else:
+                            camera_load = summary.get("camera_load")
+                            camera_load_text = (
+                                f"{round(float(camera_load) * 100)}%"
+                                if camera_load is not None
+                                else "N/A"
+                            )
                             st.markdown(
                                 f"**Side flow:** {primary_record['camera_flow_state']}  \n"
+                                f"**Camera load:** {camera_load_text}  \n"
                                 f"**Vehicles in ROI:** {format_vehicle_type_counts(primary_record['on_road_vehicle_types'])}"
                             )
 
