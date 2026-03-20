@@ -147,7 +147,7 @@ TUNNEL_LOGO_PATHS = {
     "Western Harbour Crossing": "images/WHC.avif",
 }
 
-ROI_CAPACITY_BY_CAMERA = {
+ROAD_CAPACITY_BY_CAMERA = {
     "K107F-KL2HK": 60,
     "K107F-HK2KL": 60,
     "K952F-KL2HK": 150,
@@ -387,7 +387,7 @@ def is_large_vehicle_spike(
 def compute_road_occupancy(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
-    camera_capacity: int | None,
+    road_capacity: int | None,
     on_road_detections: list[dict[str, Any]],
     on_road_vehicle_count: int,
     large_vehicle_spike_flag: bool,
@@ -400,10 +400,10 @@ def compute_road_occupancy(
     if occupancy_ratio is not None:
         return occupancy_ratio
 
-    if not camera_capacity:
+    if not road_capacity:
         return 0.0
 
-    count_score = min(on_road_vehicle_count / camera_capacity, 1.0)
+    count_score = min(on_road_vehicle_count / road_capacity, 1.0)
     if large_vehicle_spike_flag and on_road_vehicle_count <= 2:
         count_score -= LARGE_VEHICLE_COUNT_PENALTY
     return round(min(max(count_score, 0.0), 1.0), 3)
@@ -1368,7 +1368,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 all_detections = detect_vehicles(image, detector) if analysis_enabled else []
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
-                camera_capacity = ROI_CAPACITY_BY_CAMERA.get(camera_id)
+                road_capacity = ROAD_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
@@ -1381,7 +1381,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     compute_road_occupancy(
                         image=image,
                         polygon=polygon,
-                        camera_capacity=camera_capacity,
+                        road_capacity=road_capacity,
                         on_road_detections=on_road_detections,
                         on_road_vehicle_count=len(on_road_detections),
                         large_vehicle_spike_flag=large_vehicle_spike_flag,
