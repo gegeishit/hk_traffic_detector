@@ -195,10 +195,24 @@ def prune_history_rows(history: list[dict[str, Any]], cutoff: int) -> list[dict[
     return [row for row in history if int(row.get("timestamp", 0)) >= cutoff]
 
 
+def normalize_camera_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    normalized_entry = dict(entry)
+    if normalized_entry.get("road_occupancy") is None:
+        if normalized_entry.get("camera_load") is not None:
+            normalized_entry["road_occupancy"] = normalized_entry["camera_load"]
+        elif normalized_entry.get("chain_score") is not None:
+            normalized_entry["road_occupancy"] = normalized_entry["chain_score"]
+    normalized_entry.pop("camera_load", None)
+    return normalized_entry
+
+
 def prune_camera_history(history_by_camera: dict[str, list[dict[str, Any]]], cutoff: int) -> dict[str, list[dict[str, Any]]]:
     pruned_history = {}
     for camera_url, entries in history_by_camera.items():
-        kept_entries = prune_history_rows(entries, cutoff)
+        kept_entries = [
+            normalize_camera_history_entry(entry)
+            for entry in prune_history_rows(entries, cutoff)
+        ]
         if kept_entries:
             pruned_history[camera_url] = kept_entries
     return pruned_history
@@ -384,7 +398,7 @@ def is_large_vehicle_spike(
     )
 
 
-def compute_camera_load(
+def compute_road_occupancy(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
     camera_capacity: int | None,
@@ -413,13 +427,13 @@ def derive_camera_flow_metrics(
     camera_id: str,
     snapshot_time: float,
     on_road_vehicle_count: int,
-    camera_load: float,
+    road_occupancy: float,
 ) -> dict[str, Any]:
-    if on_road_vehicle_count == 0 or camera_load < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
+    if on_road_vehicle_count == 0 or road_occupancy < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
         camera_flow_state = "Clear"
-    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
+    elif road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
         camera_flow_state = "Congested"
-    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
+    elif road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
         camera_flow_state = "Slowing"
     else:
         camera_flow_state = "Busy but moving"
@@ -1108,8 +1122,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "camera_load": None,
-            "recent_camera_load": None,
+            "road_occupancy": None,
+            "recent_road_occupancy": None,
         }
 
     if analyzable_records and not calibrated_records:
@@ -1131,8 +1145,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "camera_load": None,
-            "recent_camera_load": None,
+            "road_occupancy": None,
+            "recent_road_occupancy": None,
         }
 
     if available_records and not analyzable_records:
@@ -1154,8 +1168,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "camera_load": None,
-            "recent_camera_load": None,
+            "road_occupancy": None,
+            "recent_road_occupancy": None,
         }
 
     if not detector_available:
@@ -1177,12 +1191,12 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "camera_load": None,
-            "recent_camera_load": None,
+            "road_occupancy": None,
+            "recent_road_occupancy": None,
         }
 
     primary_record = calibrated_records[0]
-    current_load = float(primary_record["camera_load"])
+    current_load = float(primary_record["road_occupancy"])
     total_on_road_vehicle_count = int(primary_record["on_road_vehicle_count"])
     average_on_road_vehicle_count = float(total_on_road_vehicle_count)
     flow_label = str(primary_record["camera_flow_state"])
@@ -1219,8 +1233,8 @@ def summarize_side(
         "average_on_road_vehicle_count": round(average_on_road_vehicle_count, 1),
         "eta_confidence": eta_confidence,
         "provisional_eta": flow_label == "Busy but moving",
-        "camera_load": round(current_load, 3),
-        "recent_camera_load": primary_record.get("recent_camera_load"),
+        "road_occupancy": round(current_load, 3),
+        "recent_road_occupancy": primary_record.get("recent_road_occupancy"),
     }
 
 
@@ -1249,7 +1263,7 @@ def record_camera_flow_history(snapshot_time: float, records_by_tunnel: dict[str
                     {
                         "timestamp": bucketed_time,
                         "on_road_vehicle_count": record["on_road_vehicle_count"],
-                        "camera_load": record["camera_load"],
+                        "road_occupancy": record["road_occupancy"],
                         "camera_flow_state": record["camera_flow_state"],
                     }
                 )
@@ -1377,8 +1391,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     on_road_detections,
                     image.size if analysis_enabled else None,
                 )
-                camera_load = (
-                    compute_camera_load(
+                road_occupancy = (
+                    compute_road_occupancy(
                         image=image,
                         polygon=polygon,
                         camera_capacity=camera_capacity,
@@ -1391,21 +1405,24 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     else 0.0
                 )
                 history = get_camera_flow_history(camera_id, bucket_timestamp(snapshot_time))
-                recent_camera_loads = [
-                    float(entry.get("camera_load", entry.get("chain_score", 0.0)))
+                recent_road_occupancies = [
+                    float(entry.get("road_occupancy", entry.get("chain_score", 0.0)))
                     for entry in history[-2:]
-                    if entry.get("camera_load") is not None or entry.get("chain_score") is not None
+                    if (
+                        entry.get("road_occupancy") is not None
+                        or entry.get("chain_score") is not None
+                    )
                 ]
-                recent_camera_load = (
-                    round(sum(recent_camera_loads) / len(recent_camera_loads), 3)
-                    if recent_camera_loads
+                recent_road_occupancy = (
+                    round(sum(recent_road_occupancies) / len(recent_road_occupancies), 3)
+                    if recent_road_occupancies
                     else None
                 )
                 camera_flow_metrics = derive_camera_flow_metrics(
                     camera_id=camera_id,
                     snapshot_time=snapshot_time,
                     on_road_vehicle_count=len(on_road_detections),
-                    camera_load=camera_load,
+                    road_occupancy=road_occupancy,
                 ) if analysis_enabled else {
                     "persistent_high_count": 0,
                     "camera_flow_state": "N/A",
@@ -1434,8 +1451,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "service_check_result": service_check_result,
                         "on_road_vehicle_count": len(on_road_detections),
                         "on_road_vehicle_types": on_road_vehicle_types,
-                        "camera_load": camera_load,
-                        "recent_camera_load": recent_camera_load,
+                        "road_occupancy": road_occupancy,
+                        "recent_road_occupancy": recent_road_occupancy,
                         "roi_configured": roi_configured,
                         **camera_flow_metrics,
                     }
@@ -1459,8 +1476,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 detector_available=detector_available,
                 detector_speed_map=detector_speed_map,
             )
-            if side_summaries[side].get("camera_load") is not None:
-                tunnel_camera_scores.append(side_summaries[side]["camera_load"])
+            if side_summaries[side].get("road_occupancy") is not None:
+                tunnel_camera_scores.append(side_summaries[side]["road_occupancy"])
 
         side_flow_bands = [
             queue_state_to_band(summary["flow_label"])
@@ -1849,15 +1866,15 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             if primary_record["service_check_result"]:
                                 st.caption(f"Feed check: {primary_record['service_check_result']}")
                         else:
-                            camera_load = summary.get("camera_load")
-                            camera_load_text = (
-                                f"{round(float(camera_load) * 100)}%"
-                                if camera_load is not None
+                            road_occupancy = summary.get("road_occupancy")
+                            road_occupancy_text = (
+                                f"{round(float(road_occupancy) * 100)}%"
+                                if road_occupancy is not None
                                 else "N/A"
                             )
                             st.markdown(
                                 f"**Side flow:** {primary_record['camera_flow_state']}  \n"
-                                f"**Camera load:** {camera_load_text}  \n"
+                                f"**Road occupancy:** {road_occupancy_text}  \n"
                                 f"**Vehicles detected:** {format_vehicle_type_counts(primary_record['on_road_vehicle_types'])}"
                             )
 

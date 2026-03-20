@@ -65,7 +65,7 @@ On each refresh cycle, the app:
 Core load formula:
 
 ```text
-camera_load = min(on_road_vehicle_count / camera_capacity, 1.0)
+road_occupancy = min(on_road_vehicle_count / camera_capacity, 1.0)
 ```
 
 Traffic-state bands:
