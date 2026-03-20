@@ -9,6 +9,11 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import altair as alt
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional until dependency is installed
+    cv2 = None
+import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 import requests
@@ -40,6 +45,8 @@ TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 2 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
+SPIKE_DOMINANCE_THRESHOLD = 0.58
+LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -49,6 +56,7 @@ SERVICE_SCREEN_LABELS = {
     "a traffic CCTV camera view of a road": False,
 }
 SERVICE_SCREEN_THRESHOLD = 0.55
+LARGE_VEHICLE_LABELS = {"bus", "truck", "tractor", "multiaxle"}
 DETECTOR_VEHICLE_LABELS = {
     "bus",
     "car",
@@ -112,6 +120,7 @@ BASELINE_SEGMENT_IDS = {
         "Kowloon": "106785",
     },
 }
+LARGE_VEHICLE_COUNT_PENALTY = 0.15
 HONG_KONG_TZ = ZoneInfo("Asia/Hong_Kong")
 
 CAMERA_SOURCE_URLS = {
@@ -341,17 +350,74 @@ def get_camera_flow_history(camera_id: str, current_bucket: int | None = None) -
     return [entry for entry in history if entry["timestamp"] < current_bucket]
 
 
+def is_large_vehicle_spike(
+    detections: list[dict[str, Any]],
+    image_size: tuple[int, int] | None,
+) -> bool:
+    if not detections or image_size is None:
+        return False
+
+    box_areas = []
+    for detection in detections:
+        box = detection["box"]
+        box_width = max(box["xmax"] - box["xmin"], 1)
+        box_height = max(box["ymax"] - box["ymin"], 1)
+        box_areas.append((box_width * box_height, detection))
+
+    total_box_area = sum(area for area, _ in box_areas)
+    if total_box_area <= 0:
+        return False
+
+    dominant_box_area, dominant_detection = max(box_areas, key=lambda item: item[0])
+    _, center_y = box_center(dominant_detection["box"])
+    vertical_ratio = center_y / max(image_size[1], 1)
+    image_area = max(image_size[0] * image_size[1], 1)
+    area_share = dominant_box_area / total_box_area
+    image_area_ratio = dominant_box_area / image_area
+    return (
+        dominant_detection["label"] in LARGE_VEHICLE_LABELS
+        and vertical_ratio >= LARGE_VEHICLE_NEAR_CAMERA_RATIO
+        and area_share >= SPIKE_DOMINANCE_THRESHOLD
+        and image_area_ratio >= 0.03
+    )
+
+
+def compute_camera_load(
+    image: Image.Image | None,
+    polygon: list[tuple[int, int]],
+    camera_capacity: int | None,
+    on_road_detections: list[dict[str, Any]],
+    on_road_vehicle_count: int,
+    large_vehicle_spike_flag: bool,
+    detector_available: bool,
+) -> float:
+    if not polygon or not detector_available or on_road_vehicle_count == 0:
+        return 0.0
+
+    occupancy_ratio = compute_segmentation_occupancy_ratio(image, polygon, on_road_detections)
+    if occupancy_ratio is not None:
+        return occupancy_ratio
+
+    if not camera_capacity:
+        return 0.0
+
+    count_score = min(on_road_vehicle_count / camera_capacity, 1.0)
+    if large_vehicle_spike_flag and on_road_vehicle_count <= 2:
+        count_score -= LARGE_VEHICLE_COUNT_PENALTY
+    return round(min(max(count_score, 0.0), 1.0), 3)
+
+
 def derive_camera_flow_metrics(
     camera_id: str,
     snapshot_time: float,
     on_road_vehicle_count: int,
-    chain_score: float,
+    camera_load: float,
 ) -> dict[str, Any]:
-    if on_road_vehicle_count == 0 or chain_score < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
+    if on_road_vehicle_count == 0 or camera_load < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
         camera_flow_state = "Clear"
-    elif chain_score >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
+    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
         camera_flow_state = "Congested"
-    elif chain_score >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
+    elif camera_load >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
         camera_flow_state = "Slowing"
     else:
         camera_flow_state = "Busy but moving"
@@ -563,60 +629,143 @@ def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
     return inter_area / union_area
 
 
-def clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
+def clip_box_to_image(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    image_width, image_height = image_size
+    xmin = max(0, min(int(box["xmin"]), image_width - 1))
+    ymin = max(0, min(int(box["ymin"]), image_height - 1))
+    xmax = max(xmin + 1, min(int(box["xmax"]), image_width))
+    ymax = max(ymin + 1, min(int(box["ymax"]), image_height))
+    if xmax <= xmin or ymax <= ymin:
+        return None
+    return {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
 
 
-def roi_axis_and_span(polygon: list[tuple[int, int]]) -> tuple[tuple[float, float], tuple[float, float], float]:
-    if len(polygon) < 2:
-        return (0.0, 0.0), (0.0, 0.0), 0.0
+def expand_box(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+    margin_ratio: float = 0.12,
+    min_margin_px: int = 4,
+) -> dict[str, int] | None:
+    clipped_box = clip_box_to_image(box, image_size)
+    if clipped_box is None:
+        return None
+    box_width = clipped_box["xmax"] - clipped_box["xmin"]
+    box_height = clipped_box["ymax"] - clipped_box["ymin"]
+    margin_x = max(min_margin_px, int(box_width * margin_ratio))
+    margin_y = max(min_margin_px, int(box_height * margin_ratio))
+    return clip_box_to_image(
+        {
+            "xmin": clipped_box["xmin"] - margin_x,
+            "ymin": clipped_box["ymin"] - margin_y,
+            "xmax": clipped_box["xmax"] + margin_x,
+            "ymax": clipped_box["ymax"] + margin_y,
+        },
+        image_size,
+    )
 
-    top_point = min(polygon, key=lambda point: (point[1], point[0]))
-    bottom_point = max(polygon, key=lambda point: (point[1], point[0]))
-    dx = float(bottom_point[0] - top_point[0])
-    dy = float(bottom_point[1] - top_point[1])
-    span = (dx ** 2 + dy ** 2) ** 0.5
-    if span <= 0:
-        return (0.0, 0.0), (0.0, 0.0), 0.0
-    return top_point, (dx / span, dy / span), span
+
+def polygon_mask(
+    image_size: tuple[int, int],
+    polygon: list[tuple[int, int]],
+) -> np.ndarray | None:
+    if cv2 is None or len(polygon) < 3:
+        return None
+    image_width, image_height = image_size
+    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    points = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(mask, [points], 1)
+    return mask.astype(bool)
 
 
-def projected_position(
-    point: tuple[float, float],
-    origin: tuple[float, float],
-    axis_vector: tuple[float, float],
-) -> float:
-    return ((point[0] - origin[0]) * axis_vector[0]) + ((point[1] - origin[1]) * axis_vector[1])
+def segment_detection_mask(
+    image_bgr: np.ndarray,
+    box: dict[str, int],
+) -> np.ndarray | None:
+    if cv2 is None:
+        return None
+
+    image_height, image_width = image_bgr.shape[:2]
+    expanded_box = expand_box(box, (image_width, image_height))
+    clipped_box = clip_box_to_image(box, (image_width, image_height))
+    if expanded_box is None or clipped_box is None:
+        return None
+
+    crop = image_bgr[
+        expanded_box["ymin"]:expanded_box["ymax"],
+        expanded_box["xmin"]:expanded_box["xmax"],
+    ]
+    if crop.size == 0:
+        return None
+
+    rect_x = clipped_box["xmin"] - expanded_box["xmin"]
+    rect_y = clipped_box["ymin"] - expanded_box["ymin"]
+    rect_w = clipped_box["xmax"] - clipped_box["xmin"]
+    rect_h = clipped_box["ymax"] - clipped_box["ymin"]
+    if rect_w <= 2 or rect_h <= 2:
+        return None
+
+    grabcut_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+    bg_model = np.zeros((1, 65), np.float64)
+    fg_model = np.zeros((1, 65), np.float64)
+
+    try:
+        cv2.grabCut(
+            crop,
+            grabcut_mask,
+            (rect_x, rect_y, rect_w, rect_h),
+            bg_model,
+            fg_model,
+            1,
+            cv2.GC_INIT_WITH_RECT,
+        )
+    except cv2.error:
+        return None
+
+    foreground = np.isin(grabcut_mask, (cv2.GC_FGD, cv2.GC_PR_FGD))
+    if not foreground.any():
+        return None
+
+    full_mask = np.zeros((image_height, image_width), dtype=bool)
+    full_mask[
+        expanded_box["ymin"]:expanded_box["ymax"],
+        expanded_box["xmin"]:expanded_box["xmax"],
+    ] = foreground
+    return full_mask
 
 
-def compute_chain_score(
+def compute_segmentation_occupancy_ratio(
+    image: Image.Image | None,
     polygon: list[tuple[int, int]],
     detections: list[dict[str, Any]],
-) -> float:
-    if len(detections) < 2 or len(polygon) < 2:
-        return 0.0
+) -> float | None:
+    if cv2 is None or image is None or not polygon or not detections:
+        return None
 
-    axis_origin, axis_vector, road_span = roi_axis_and_span(polygon)
-    if road_span <= 0:
-        return 0.0
+    roi_mask = polygon_mask(image.size, polygon)
+    if roi_mask is None:
+        return None
+    roi_area = int(np.count_nonzero(roi_mask))
+    if roi_area <= 0:
+        return None
 
-    projected_centers = sorted(
-        projected_position(box_center(detection["box"]), axis_origin, axis_vector)
-        for detection in detections
-    )
-    if len(projected_centers) < 2:
-        return 0.0
+    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    vehicle_mask = np.zeros(roi_mask.shape, dtype=bool)
+    any_segmented = False
+    for detection in detections:
+        detection_mask = segment_detection_mask(image_bgr, detection["box"])
+        if detection_mask is None:
+            continue
+        vehicle_mask |= detection_mask
+        any_segmented = True
 
-    gaps = [
-        max(projected_centers[index + 1] - projected_centers[index], 0.0)
-        for index in range(len(projected_centers) - 1)
-    ]
-    avg_gap = sum(gaps) / len(gaps) if gaps else 0.0
-    chain_length = max(projected_centers[-1] - projected_centers[0], 0.0)
+    if not any_segmented:
+        return None
 
-    gap_score = 1.0 - clamp(avg_gap / road_span, 0.0, 1.0)
-    queue_span_score = clamp(chain_length / road_span, 0.0, 1.0)
-    return round(clamp((0.5 * gap_score) + (0.5 * queue_span_score), 0.0, 1.0), 3)
+    occupied_pixels = int(np.count_nonzero(vehicle_mask & roi_mask))
+    return round(min(max(occupied_pixels / roi_area, 0.0), 1.0), 3)
 
 
 def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -941,8 +1090,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "chain_score": None,
-            "recent_chain_score": None,
+            "camera_load": None,
+            "recent_camera_load": None,
         }
 
     if analyzable_records and not calibrated_records:
@@ -964,8 +1113,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "chain_score": None,
-            "recent_chain_score": None,
+            "camera_load": None,
+            "recent_camera_load": None,
         }
 
     if available_records and not analyzable_records:
@@ -987,8 +1136,8 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "chain_score": None,
-            "recent_chain_score": None,
+            "camera_load": None,
+            "recent_camera_load": None,
         }
 
     if not detector_available:
@@ -1010,12 +1159,12 @@ def summarize_side(
             "average_on_road_vehicle_count": 0.0,
             "eta_confidence": "none",
             "provisional_eta": False,
-            "chain_score": None,
-            "recent_chain_score": None,
+            "camera_load": None,
+            "recent_camera_load": None,
         }
 
     primary_record = calibrated_records[0]
-    current_chain_score = float(primary_record["chain_score"])
+    current_load = float(primary_record["camera_load"])
     total_on_road_vehicle_count = int(primary_record["on_road_vehicle_count"])
     average_on_road_vehicle_count = float(total_on_road_vehicle_count)
     flow_label = str(primary_record["camera_flow_state"])
@@ -1052,8 +1201,8 @@ def summarize_side(
         "average_on_road_vehicle_count": round(average_on_road_vehicle_count, 1),
         "eta_confidence": eta_confidence,
         "provisional_eta": flow_label == "Busy but moving",
-        "chain_score": round(current_chain_score, 3),
-        "recent_chain_score": primary_record.get("recent_chain_score"),
+        "camera_load": round(current_load, 3),
+        "recent_camera_load": primary_record.get("recent_camera_load"),
     }
 
 
@@ -1082,7 +1231,7 @@ def record_camera_flow_history(snapshot_time: float, records_by_tunnel: dict[str
                     {
                         "timestamp": bucketed_time,
                         "on_road_vehicle_count": record["on_road_vehicle_count"],
-                        "chain_score": record["chain_score"],
+                        "camera_load": record["camera_load"],
                         "camera_flow_state": record["camera_flow_state"],
                     }
                 )
@@ -1203,31 +1352,44 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 all_detections = detect_vehicles(image, detector) if analysis_enabled else []
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
+                camera_capacity = ROI_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
                 )
-                chain_score = (
-                    compute_chain_score(polygon, on_road_detections)
-                    if analysis_enabled and detector_available
+                large_vehicle_spike_flag = is_large_vehicle_spike(
+                    on_road_detections,
+                    image.size if analysis_enabled else None,
+                )
+                camera_load = (
+                    compute_camera_load(
+                        image=image,
+                        polygon=polygon,
+                        camera_capacity=camera_capacity,
+                        on_road_detections=on_road_detections,
+                        on_road_vehicle_count=len(on_road_detections),
+                        large_vehicle_spike_flag=large_vehicle_spike_flag,
+                        detector_available=detector_available,
+                    )
+                    if analysis_enabled
                     else 0.0
                 )
                 history = get_camera_flow_history(camera_id, bucket_timestamp(snapshot_time))
-                recent_chain_scores = [
-                    float(entry.get("chain_score", entry.get("camera_load", 0.0)))
+                recent_camera_loads = [
+                    float(entry.get("camera_load", entry.get("chain_score", 0.0)))
                     for entry in history[-2:]
-                    if entry.get("chain_score") is not None or entry.get("camera_load") is not None
+                    if entry.get("camera_load") is not None or entry.get("chain_score") is not None
                 ]
-                recent_chain_score = (
-                    round(sum(recent_chain_scores) / len(recent_chain_scores), 3)
-                    if recent_chain_scores
+                recent_camera_load = (
+                    round(sum(recent_camera_loads) / len(recent_camera_loads), 3)
+                    if recent_camera_loads
                     else None
                 )
                 camera_flow_metrics = derive_camera_flow_metrics(
                     camera_id=camera_id,
                     snapshot_time=snapshot_time,
                     on_road_vehicle_count=len(on_road_detections),
-                    chain_score=chain_score,
+                    camera_load=camera_load,
                 ) if analysis_enabled else {
                     "persistent_high_count": 0,
                     "camera_flow_state": "N/A",
@@ -1256,8 +1418,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "service_check_result": service_check_result,
                         "on_road_vehicle_count": len(on_road_detections),
                         "on_road_vehicle_types": on_road_vehicle_types,
-                        "chain_score": chain_score,
-                        "recent_chain_score": recent_chain_score,
+                        "camera_load": camera_load,
+                        "recent_camera_load": recent_camera_load,
                         "roi_configured": roi_configured,
                         **camera_flow_metrics,
                     }
@@ -1271,8 +1433,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 detector_available=detector_available,
                 detector_speed_map=detector_speed_map,
             )
-            if side_summaries[side].get("chain_score") is not None:
-                tunnel_camera_scores.append(side_summaries[side]["chain_score"])
+            if side_summaries[side].get("camera_load") is not None:
+                tunnel_camera_scores.append(side_summaries[side]["camera_load"])
 
         side_flow_bands = [
             queue_state_to_band(summary["flow_label"])
@@ -1608,7 +1770,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     render_trend_chart(snapshot_time)
 
     st.caption(
-        "Est. crossing time is calculated from tunnel length and vehicle speed, with chain-based traffic flow reducing speed when the approach looks crowded."
+        "Est. crossing time is calculated from tunnel length and vehicle speed, with camera-derived traffic flow reducing speed when the approach looks crowded."
     )
 
     for tunnel, side_map in TUNNELS.items():
@@ -1662,15 +1824,15 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             if primary_record["service_check_result"]:
                                 st.caption(f"Feed check: {primary_record['service_check_result']}")
                         else:
-                            chain_score = summary.get("chain_score")
-                            chain_score_text = (
-                                f"{float(chain_score):.2f}"
-                                if chain_score is not None
+                            camera_load = summary.get("camera_load")
+                            camera_load_text = (
+                                f"{round(float(camera_load) * 100)}%"
+                                if camera_load is not None
                                 else "N/A"
                             )
                             st.markdown(
                                 f"**Side flow:** {primary_record['camera_flow_state']}  \n"
-                                f"**Chain score:** {chain_score_text}  \n"
+                                f"**Camera load:** {camera_load_text}  \n"
                                 f"**Vehicles detected:** {format_vehicle_type_counts(primary_record['on_road_vehicle_types'])}"
                             )
 
