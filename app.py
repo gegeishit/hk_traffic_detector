@@ -195,24 +195,10 @@ def prune_history_rows(history: list[dict[str, Any]], cutoff: int) -> list[dict[
     return [row for row in history if int(row.get("timestamp", 0)) >= cutoff]
 
 
-def normalize_camera_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    normalized_entry = dict(entry)
-    if normalized_entry.get("road_occupancy") is None:
-        if normalized_entry.get("camera_load") is not None:
-            normalized_entry["road_occupancy"] = normalized_entry["camera_load"]
-        elif normalized_entry.get("chain_score") is not None:
-            normalized_entry["road_occupancy"] = normalized_entry["chain_score"]
-    normalized_entry.pop("camera_load", None)
-    return normalized_entry
-
-
 def prune_camera_history(history_by_camera: dict[str, list[dict[str, Any]]], cutoff: int) -> dict[str, list[dict[str, Any]]]:
     pruned_history = {}
     for camera_url, entries in history_by_camera.items():
-        kept_entries = [
-            normalize_camera_history_entry(entry)
-            for entry in prune_history_rows(entries, cutoff)
-        ]
+        kept_entries = prune_history_rows(entries, cutoff)
         if kept_entries:
             pruned_history[camera_url] = kept_entries
     return pruned_history
@@ -1406,12 +1392,9 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 )
                 history = get_camera_flow_history(camera_id, bucket_timestamp(snapshot_time))
                 recent_road_occupancies = [
-                    float(entry.get("road_occupancy", entry.get("chain_score", 0.0)))
+                    float(entry["road_occupancy"])
                     for entry in history[-2:]
-                    if (
-                        entry.get("road_occupancy") is not None
-                        or entry.get("chain_score") is not None
-                    )
+                    if entry.get("road_occupancy") is not None
                 ]
                 recent_road_occupancy = (
                     round(sum(recent_road_occupancies) / len(recent_road_occupancies), 3)
