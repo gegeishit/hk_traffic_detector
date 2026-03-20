@@ -25,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover - optional at runtime until dependency is installed
     st_autorefresh = None
 
+STREAMLIT_FRAGMENT = getattr(st, "fragment", None)
 
 st.set_page_config(page_title="Hong Kong Tunnel Traffic Monitor", page_icon="🚗", layout="wide")
 
@@ -1351,7 +1352,10 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
             if st.button("Refresh data", use_container_width=True, type="secondary"):
                 download_image_bytes.clear()
                 download_segment_speed_xml.clear()
-                st.rerun()
+                if STREAMLIT_FRAGMENT is not None:
+                    st.rerun(scope="fragment")
+                else:
+                    st.rerun()
 
 
 def render_trend_chart(snapshot_time: float) -> None:
@@ -1598,7 +1602,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     )
     st.caption(
         f"Snapshot captured at {datetime.fromtimestamp(snapshot_time, HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')} HKT "
-        f"({'Auto refresh every 2 min' if st_autorefresh is not None else 'Auto refresh unavailable'})"
+        f"({'Auto refresh every 2 min' if STREAMLIT_FRAGMENT is not None or st_autorefresh is not None else 'Auto refresh unavailable'})"
     )
     render_top_bar(snapshot_time, st.session_state.get("model_errors", {}), records_by_tunnel)
     render_trend_chart(snapshot_time)
@@ -1682,18 +1686,31 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             )
 
 
-def main() -> None:
-    init_session_state()
-
-    if st_autorefresh is not None:
-        st_autorefresh(interval=AUTO_REFRESH_INTERVAL_MS, key="live_dashboard_refresh")
-
+def render_live_dashboard_cycle() -> None:
     with st.spinner("Refreshing live traffic snapshot..."):
         snapshot_time, records_by_tunnel, tunnel_metrics, model_errors = build_snapshot()
     st.session_state["model_errors"] = model_errors
     record_camera_flow_history(snapshot_time, records_by_tunnel)
     record_traffic_status_history(snapshot_time, tunnel_metrics)
     render_dashboard(snapshot_time, records_by_tunnel, tunnel_metrics)
+
+
+if STREAMLIT_FRAGMENT is not None:
+    @STREAMLIT_FRAGMENT(run_every=AUTO_REFRESH_INTERVAL_MS / 1000)
+    def render_live_dashboard_fragment() -> None:
+        render_live_dashboard_cycle()
+else:
+    def render_live_dashboard_fragment() -> None:
+        render_live_dashboard_cycle()
+
+
+def main() -> None:
+    init_session_state()
+
+    if STREAMLIT_FRAGMENT is None and st_autorefresh is not None:
+        st_autorefresh(interval=AUTO_REFRESH_INTERVAL_MS, key="live_dashboard_refresh")
+
+    render_live_dashboard_fragment()
 
 
 if __name__ == "__main__":
