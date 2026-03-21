@@ -64,14 +64,12 @@ DETECTOR_VEHICLE_LABELS = {
     "truck",
 }
 ANNOTATION_COLORS = {
-    "car": (59, 130, 246),
-    "bus": (234, 88, 12),
-    "truck": (220, 38, 38),
-    "motorcycle": (16, 185, 129),
+    "car": (0, 240, 255),
+    "bus": (255, 214, 10),
+    "truck": (255, 90, 90),
+    "motorcycle": (70, 255, 140),
 }
-ANNOTATION_BOX_ALPHA = 150
-ANNOTATION_MASK_ALPHA = 52
-ANNOTATION_MASK_CORE_ALPHA = 88
+ANNOTATION_BOX_ALPHA = 235
 MASK_CORRECTION_KERNEL_SIZE = 5
 MASK_CORRECTION_ITERATIONS = 1
 
@@ -838,8 +836,6 @@ def annotate_image(
     for detection in display_detections:
         color = ANNOTATION_COLORS.get(detection["label"], (220, 38, 38))
         box_color = (*color, ANNOTATION_BOX_ALPHA)
-        mask_color = (*color, ANNOTATION_MASK_ALPHA)
-        core_mask_color = (*color, ANNOTATION_MASK_CORE_ALPHA)
 
         box = detection["box"]
         xmin = box["xmin"]
@@ -849,21 +845,8 @@ def annotate_image(
 
         box_width = max(xmax - xmin, 1)
         box_height = max(ymax - ymin, 1)
-        corner_radius = max(4, min(box_width, box_height) // 6)
-        inset_x = max(1, box_width // 14)
-        inset_y = max(1, box_height // 18)
-        inner_box = (xmin + inset_x, ymin + inset_y, xmax - inset_x, ymax - inset_y)
-        core_top = ymin + max(2, int(box_height * 0.28))
-        core_box = (
-            xmin + max(1, int(box_width * 0.12)),
-            core_top,
-            xmax - max(1, int(box_width * 0.12)),
-            ymax - max(1, int(box_height * 0.08)),
-        )
-
-        overlay_draw.rounded_rectangle(inner_box, radius=corner_radius, fill=mask_color)
-        overlay_draw.rounded_rectangle(core_box, radius=max(3, corner_radius - 1), fill=core_mask_color)
-        overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=2)
+        corner_radius = max(3, min(box_width, box_height) // 8)
+        overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=1)
 
     annotated = Image.alpha_composite(annotated, overlay)
     return annotated.convert("RGB")
