@@ -26,7 +26,7 @@ For Cross Harbour Tunnel and Eastern Harbour Crossing, one shared image source i
 ## Live Stack
 
 - UI: `Streamlit`
-- Object detector: `Gegeishit/hk-traffic-detector-detr`
+- Object detector: `Gegeishit/yolos-small-hk-traffic-finetuned`
 - Service-screen classifier: `google/siglip-base-patch16-224`
 - Image processing: `Pillow`
 - Data handling/charting: `pandas`, `altair`
