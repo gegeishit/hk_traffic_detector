@@ -74,10 +74,10 @@ road_occupancy = covered_padded_footprint_polygon_area_inside_roi / roi_area
 The occupancy score uses a padded lower-footprint polygon per vehicle, while the visible annotation boxes remain the raw detector boxes.
 
 Traffic-state bands:
-- `Clear`: load `< 0.20`
-- `Busy but moving`: load `0.20` to `< 0.45`
-- `Slowing`: load `0.45` to `< 0.70`
-- `Congested`: load `>= 0.70`
+- `Clear`: load `< 0.30`
+- `Busy but moving`: load `0.30` to `< 0.55`
+- `Slowing`: load `0.55` to `< 0.80`
+- `Congested`: load `>= 0.80`
 
 Speed adjustment factors:
 - `Clear`: `100%`

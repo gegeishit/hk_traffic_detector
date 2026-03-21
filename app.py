@@ -76,9 +76,9 @@ DEFAULT_BASELINE_SPEED_KMH = {
     "Western Harbour Crossing": 60.0,
 }
 FLOW_STATE_LOAD_THRESHOLDS = {
-    "busy_but_moving": 0.20,
-    "slowing": 0.45,
-    "congested": 0.70,
+    "busy_but_moving": 0.30,
+    "slowing": 0.55,
+    "congested": 0.80,
 }
 FLOW_SPEED_FACTORS = {
     "Clear": 1.0,
