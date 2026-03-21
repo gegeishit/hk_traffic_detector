@@ -73,16 +73,16 @@ road_occupancy = min(on_road_vehicle_count / road_capacity, 1.0)
 `road_occupancy` is kept internally as a `0..1` float and displayed in the UI as a percentage.
 
 Traffic-state bands:
-- `Clear`: load `< 0.25`
-- `Busy but moving`: load `0.25` to `< 0.5`
-- `Slowing`: load `0.5` to `< 0.75`
-- `Congested`: load `>= 0.75`
+- `Clear`: load `< 0.20`
+- `Busy but moving`: load `0.20` to `< 0.45`
+- `Slowing`: load `0.45` to `< 0.70`
+- `Congested`: load `>= 0.70`
 
 Speed adjustment factors:
 - `Clear`: `100%`
-- `Busy but moving`: `75%`
-- `Slowing`: `50%`
-- `Congested`: `25%`
+- `Busy but moving`: `95%`
+- `Slowing`: `85%`
+- `Congested`: `70%`
 
 Fallback behavior:
 - if live XML speed is unavailable, the app falls back to `60 km/h`

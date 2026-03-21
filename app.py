@@ -88,15 +88,15 @@ DEFAULT_BASELINE_SPEED_KMH = {
     "Western Harbour Crossing": 60.0,
 }
 FLOW_STATE_LOAD_THRESHOLDS = {
-    "busy_but_moving": 0.25,
-    "slowing": 0.5,
-    "congested": 0.75,
+    "busy_but_moving": 0.20,
+    "slowing": 0.45,
+    "congested": 0.70,
 }
 FLOW_SPEED_FACTORS = {
     "Clear": 1.0,
-    "Busy but moving": 0.75,
-    "Slowing": 0.5,
-    "Congested": 0.25,
+    "Busy but moving": 0.95,
+    "Slowing": 0.85,
+    "Congested": 0.70,
 }
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
