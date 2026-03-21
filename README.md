@@ -102,7 +102,7 @@ Current key constants:
 Current road capacities:
 - CHT `HK -> KL` (`K107F-HK2KL`): `174`
 - CHT `KL -> HK` (`K107F-KL2HK`): `171`
-- EHC `HK -> KL` (`K952F-HK2KL`): `107`
+- EHC `HK -> KL` (`K952F-HK2KL`): `86`
 - EHC `KL -> HK` (`K952F-KL2HK`): `133`
 - WHC `HK -> KL` (`H702F`): `86`
 - WHC `KL -> HK` (`K901F`): `41`
