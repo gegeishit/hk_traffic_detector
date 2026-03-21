@@ -67,7 +67,7 @@ The snapshot build currently fetches all camera images first, then fetches the X
 Core load formula:
 
 ```text
-road_occupancy = min(on_road_vehicle_count / road_capacity, 1.0)
+road_occupancy = covered_bounding_box_area_inside_roi / roi_area
 ```
 
 `road_occupancy` is kept internally as a `0..1` float and displayed in the UI as a percentage.
@@ -86,6 +86,7 @@ Speed adjustment factors:
 
 Fallback behavior:
 - if live XML speed is unavailable, the app falls back to `60 km/h`
+- if ROI-area occupancy cannot be computed, the app falls back to `on_road_vehicle_count / road_capacity`
 
 Current key constants:
 - detector confidence threshold: `0.18`
@@ -99,7 +100,7 @@ Current key constants:
   - EHC: `70 km/h`
   - WHC: `70 km/h`
 
-Current road capacities:
+Configured road capacities (fallback/reference):
 - CHT `HK -> KL` (`K107F-HK2KL`): `174`
 - CHT `KL -> HK` (`K107F-KL2HK`): `171`
 - EHC `HK -> KL` (`K952F-HK2KL`): `86`

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import altair as alt
 import pandas as pd
-from PIL import Image, ImageDraw, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 import requests
 import streamlit as st
 import torch
@@ -379,6 +379,24 @@ def compute_road_occupancy(
 ) -> float:
     if not polygon or not detector_available or on_road_vehicle_count == 0:
         return 0.0
+
+    if image is not None:
+        roi_mask = Image.new("L", image.size, 0)
+        roi_draw = ImageDraw.Draw(roi_mask)
+        roi_draw.polygon(polygon, fill=255)
+        roi_area = sum(roi_mask.histogram()[1:])
+        if roi_area > 0:
+            vehicle_mask = Image.new("L", image.size, 0)
+            vehicle_draw = ImageDraw.Draw(vehicle_mask)
+            for detection in on_road_detections:
+                box = detection["box"]
+                vehicle_draw.rectangle(
+                    (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
+                    fill=255,
+                )
+            covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
+            bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
+            return round(bbox_occupancy_ratio, 3)
 
     if not road_capacity:
         return 0.0
