@@ -42,6 +42,8 @@ TREND_BUCKET_SECONDS = 2 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
+OCCUPANCY_BOX_PADDING_RATIO = 0.12
+OCCUPANCY_BOX_PADDING_MIN_PX = 4
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -389,7 +391,9 @@ def compute_road_occupancy(
             vehicle_mask = Image.new("L", image.size, 0)
             vehicle_draw = ImageDraw.Draw(vehicle_mask)
             for detection in on_road_detections:
-                box = detection["box"]
+                box = expand_box_for_occupancy(detection["box"], image.size)
+                if box is None:
+                    continue
                 vehicle_draw.rectangle(
                     (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
                     fill=255,
@@ -627,6 +631,42 @@ def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
     if union_area <= 0:
         return 0.0
     return inter_area / union_area
+
+
+def clip_box_to_image(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    image_width, image_height = image_size
+    xmin = max(0, min(int(box["xmin"]), image_width - 1))
+    ymin = max(0, min(int(box["ymin"]), image_height - 1))
+    xmax = max(xmin + 1, min(int(box["xmax"]), image_width))
+    ymax = max(ymin + 1, min(int(box["ymax"]), image_height))
+    if xmax <= xmin or ymax <= ymin:
+        return None
+    return {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+
+
+def expand_box_for_occupancy(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    clipped_box = clip_box_to_image(box, image_size)
+    if clipped_box is None:
+        return None
+    box_width = clipped_box["xmax"] - clipped_box["xmin"]
+    box_height = clipped_box["ymax"] - clipped_box["ymin"]
+    margin_x = max(OCCUPANCY_BOX_PADDING_MIN_PX, int(box_width * OCCUPANCY_BOX_PADDING_RATIO))
+    margin_y = max(OCCUPANCY_BOX_PADDING_MIN_PX, int(box_height * OCCUPANCY_BOX_PADDING_RATIO))
+    return clip_box_to_image(
+        {
+            "xmin": clipped_box["xmin"] - margin_x,
+            "ymin": clipped_box["ymin"] - margin_y,
+            "xmax": clipped_box["xmax"] + margin_x,
+            "ymax": clipped_box["ymax"] + margin_y,
+        },
+        image_size,
+    )
 
 
 def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
