@@ -764,6 +764,28 @@ def mask_outline_paths(mask: np.ndarray, min_area_px: float = 12.0) -> list[list
     return outline_paths
 
 
+def refine_detections_with_masks(
+    image: Image.Image | None,
+    detections: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if cv2 is None or image is None or not detections:
+        return detections
+
+    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    refined_detections: list[dict[str, Any]] = []
+    for detection in detections:
+        refined_detection = dict(detection)
+        detection_mask = segment_detection_mask(image_bgr, detection["box"])
+        if detection_mask is not None:
+            corrected_mask = apply_mask_correction(detection_mask)
+            outline_paths = mask_outline_paths(corrected_mask)
+            if outline_paths:
+                refined_detection["refined_mask"] = corrected_mask
+                refined_detection["refined_outline_paths"] = outline_paths
+        refined_detections.append(refined_detection)
+    return refined_detections
+
+
 def compute_segmentation_occupancy_ratio(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
@@ -779,14 +801,19 @@ def compute_segmentation_occupancy_ratio(
     if roi_area <= 0:
         return None
 
-    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    image_bgr: np.ndarray | None = None
     vehicle_mask = np.zeros(roi_mask.shape, dtype=bool)
     any_segmented = False
     for detection in detections:
-        detection_mask = segment_detection_mask(image_bgr, detection["box"])
+        detection_mask = detection.get("refined_mask")
+        if detection_mask is None:
+            if image_bgr is None:
+                image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+            raw_mask = segment_detection_mask(image_bgr, detection["box"])
+            detection_mask = apply_mask_correction(raw_mask) if raw_mask is not None else None
         if detection_mask is None:
             continue
-        vehicle_mask |= apply_mask_correction(detection_mask)
+        vehicle_mask |= detection_mask
         any_segmented = True
 
     if not any_segmented:
@@ -851,7 +878,6 @@ def annotate_image(
 
     overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
-    image_bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR) if cv2 is not None else None
 
     for detection in display_detections:
         color = ANNOTATION_COLORS.get(detection["label"], (220, 38, 38))
@@ -867,13 +893,11 @@ def annotate_image(
         box_height = max(ymax - ymin, 1)
         corner_radius = max(3, min(box_width, box_height) // 8)
 
-        if image_bgr is not None:
-            detection_mask = segment_detection_mask(image_bgr, box)
-            outline_paths = mask_outline_paths(detection_mask) if detection_mask is not None else []
-            if outline_paths:
-                for path in outline_paths:
-                    overlay_draw.line(path + [path[0]], fill=box_color, width=1)
-                continue
+        outline_paths = detection.get("refined_outline_paths", [])
+        if outline_paths:
+            for path in outline_paths:
+                overlay_draw.line(path + [path[0]], fill=box_color, width=1)
+            continue
 
         overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=1)
 
@@ -1351,6 +1375,11 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 roi_configured = bool(polygon)
                 road_capacity = ROAD_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
+                refined_on_road_detections = (
+                    refine_detections_with_masks(image, on_road_detections)
+                    if analysis_enabled and image is not None
+                    else on_road_detections
+                )
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
                 )
@@ -1363,7 +1392,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         image=image,
                         polygon=polygon,
                         road_capacity=road_capacity,
-                        on_road_detections=on_road_detections,
+                        on_road_detections=refined_on_road_detections,
                         on_road_vehicle_count=len(on_road_detections),
                         large_vehicle_spike_flag=large_vehicle_spike_flag,
                         detector_available=detector_available,
@@ -1395,7 +1424,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 if analysis_enabled and image is not None:
                     annotated_image = annotate_image(
                         image,
-                        on_road_detections,
+                        refined_on_road_detections,
                         polygon,
                     )
 
