@@ -745,6 +745,25 @@ def apply_mask_correction(mask: np.ndarray) -> np.ndarray:
     return corrected_mask.astype(bool)
 
 
+def mask_outline_paths(mask: np.ndarray, min_area_px: float = 12.0) -> list[list[tuple[int, int]]]:
+    if cv2 is None or not np.any(mask):
+        return []
+
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    outline_paths: list[list[tuple[int, int]]] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < min_area_px:
+            continue
+        points = [(int(point[0][0]), int(point[0][1])) for point in contour]
+        if len(points) >= 2:
+            outline_paths.append(points)
+    return outline_paths
+
+
 def compute_segmentation_occupancy_ratio(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
@@ -832,6 +851,7 @@ def annotate_image(
 
     overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
+    image_bgr = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR) if cv2 is not None else None
 
     for detection in display_detections:
         color = ANNOTATION_COLORS.get(detection["label"], (220, 38, 38))
@@ -846,6 +866,15 @@ def annotate_image(
         box_width = max(xmax - xmin, 1)
         box_height = max(ymax - ymin, 1)
         corner_radius = max(3, min(box_width, box_height) // 8)
+
+        if image_bgr is not None:
+            detection_mask = segment_detection_mask(image_bgr, box)
+            outline_paths = mask_outline_paths(detection_mask) if detection_mask is not None else []
+            if outline_paths:
+                for path in outline_paths:
+                    overlay_draw.line(path + [path[0]], fill=box_color, width=1)
+                continue
+
         overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=1)
 
     annotated = Image.alpha_composite(annotated, overlay)
