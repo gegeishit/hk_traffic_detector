@@ -694,11 +694,7 @@ def annotate_image(
         ymin = box["ymin"]
         xmax = box["xmax"]
         ymax = box["ymax"]
-
-        box_width = max(xmax - xmin, 1)
-        box_height = max(ymax - ymin, 1)
-        corner_radius = max(3, min(box_width, box_height) // 8)
-        overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=1)
+        overlay_draw.rectangle((xmin, ymin, xmax, ymax), outline=box_color, width=1)
 
     annotated = Image.alpha_composite(annotated, overlay)
     return annotated.convert("RGB")
