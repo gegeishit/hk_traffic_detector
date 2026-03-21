@@ -46,6 +46,7 @@ OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
 OCCUPANCY_FOOTPRINT_TOP_RATIO = 0.55
 OCCUPANCY_FOOTPRINT_TOP_INSET_RATIO = 0.18
+CROSS_HARBOUR_CAR_COUNT_MULTIPLIER = 2
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -826,6 +827,23 @@ def format_vehicle_type_counts(vehicle_counts: dict[str, int]) -> str:
     return ", ".join(f"{label} {count}" for label, count in ordered_counts)
 
 
+def calibrated_vehicle_counts(
+    tunnel: str,
+    vehicle_counts: dict[str, int],
+    raw_vehicle_count: int,
+) -> tuple[dict[str, int], int]:
+    calibrated_counts = dict(vehicle_counts)
+    calibrated_total = raw_vehicle_count
+
+    if tunnel == "Cross Harbour Tunnel":
+        car_count = calibrated_counts.get("car", 0)
+        if car_count > 0:
+            calibrated_counts["car"] = car_count * CROSS_HARBOUR_CAR_COUNT_MULTIPLIER
+            calibrated_total += car_count * (CROSS_HARBOUR_CAR_COUNT_MULTIPLIER - 1)
+
+    return calibrated_counts, calibrated_total
+
+
 def fixed_baseline_seconds(tunnel: str) -> int:
     default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
     if default_speed_kmh <= 0:
@@ -1238,8 +1256,14 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 roi_configured = bool(polygon)
                 road_capacity = ROAD_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
-                on_road_vehicle_types = dict(
+                raw_on_road_vehicle_count = len(on_road_detections)
+                raw_on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
+                )
+                on_road_vehicle_types, on_road_vehicle_count = calibrated_vehicle_counts(
+                    tunnel=tunnel,
+                    vehicle_counts=raw_on_road_vehicle_types,
+                    raw_vehicle_count=raw_on_road_vehicle_count,
                 )
                 large_vehicle_spike_flag = is_large_vehicle_spike(
                     on_road_detections,
@@ -1251,7 +1275,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         polygon=polygon,
                         road_capacity=road_capacity,
                         on_road_detections=on_road_detections,
-                        on_road_vehicle_count=len(on_road_detections),
+                        on_road_vehicle_count=on_road_vehicle_count,
                         large_vehicle_spike_flag=large_vehicle_spike_flag,
                         detector_available=detector_available,
                     )
@@ -1272,7 +1296,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 camera_flow_metrics = derive_camera_flow_metrics(
                     camera_id=camera_id,
                     snapshot_time=snapshot_time,
-                    on_road_vehicle_count=len(on_road_detections),
+                    on_road_vehicle_count=on_road_vehicle_count,
                     road_occupancy=road_occupancy,
                 ) if analysis_enabled else {
                     "persistent_high_count": 0,
@@ -1300,7 +1324,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "analysis_enabled": analysis_enabled,
                         "service_unavailable_detected": service_unavailable_detected,
                         "service_check_result": service_check_result,
-                        "on_road_vehicle_count": len(on_road_detections),
+                        "on_road_vehicle_count": on_road_vehicle_count,
                         "on_road_vehicle_types": on_road_vehicle_types,
                         "road_occupancy": road_occupancy,
                         "recent_road_occupancy": recent_road_occupancy,
