@@ -67,11 +67,11 @@ The snapshot build currently fetches all camera images first, then fetches the X
 Core load formula:
 
 ```text
-road_occupancy = covered_padded_bounding_box_area_inside_roi / roi_area
+road_occupancy = covered_padded_footprint_polygon_area_inside_roi / roi_area
 ```
 
 `road_occupancy` is kept internally as a `0..1` float and displayed in the UI as a percentage.
-The padding is used only for occupancy scoring, not for the visible annotation boxes.
+The occupancy score uses a padded lower-footprint polygon per vehicle, while the visible annotation boxes remain the raw detector boxes.
 
 Traffic-state bands:
 - `Clear`: load `< 0.20`

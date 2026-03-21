@@ -44,6 +44,8 @@ SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
 OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
+OCCUPANCY_FOOTPRINT_TOP_RATIO = 0.55
+OCCUPANCY_FOOTPRINT_TOP_INSET_RATIO = 0.18
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -391,13 +393,10 @@ def compute_road_occupancy(
             vehicle_mask = Image.new("L", image.size, 0)
             vehicle_draw = ImageDraw.Draw(vehicle_mask)
             for detection in on_road_detections:
-                box = expand_box_for_occupancy(detection["box"], image.size)
-                if box is None:
+                footprint_polygon = occupancy_footprint_polygon(detection["box"], image.size)
+                if not footprint_polygon:
                     continue
-                vehicle_draw.rectangle(
-                    (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
-                    fill=255,
-                )
+                vehicle_draw.polygon(footprint_polygon, fill=255)
             covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
             bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
             return round(bbox_occupancy_ratio, 3)
@@ -667,6 +666,32 @@ def expand_box_for_occupancy(
         },
         image_size,
     )
+
+
+def occupancy_footprint_polygon(
+    box: dict[str, int],
+    image_size: tuple[int, int],
+) -> list[tuple[int, int]]:
+    expanded_box = expand_box_for_occupancy(box, image_size)
+    if expanded_box is None:
+        return []
+
+    xmin = expanded_box["xmin"]
+    ymin = expanded_box["ymin"]
+    xmax = expanded_box["xmax"]
+    ymax = expanded_box["ymax"]
+    box_width = max(xmax - xmin, 1)
+    box_height = max(ymax - ymin, 1)
+
+    top_y = ymin + int(box_height * OCCUPANCY_FOOTPRINT_TOP_RATIO)
+    top_inset = max(1, int(box_width * OCCUPANCY_FOOTPRINT_TOP_INSET_RATIO))
+    polygon = [
+        (xmin, ymax),
+        (xmin + top_inset, top_y),
+        (xmax - top_inset, top_y),
+        (xmax, ymax),
+    ]
+    return polygon
 
 
 def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
