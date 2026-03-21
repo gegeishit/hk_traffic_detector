@@ -148,12 +148,12 @@ TUNNEL_LOGO_PATHS = {
 }
 
 ROAD_CAPACITY_BY_CAMERA = {
-    "K107F-KL2HK": 60,
-    "K107F-HK2KL": 60,
-    "K952F-KL2HK": 150,
-    "K952F-HK2KL": 150,
-    "H702F": 30,
-    "K901F": 30,
+    "K107F-KL2HK": 171,
+    "K107F-HK2KL": 174,
+    "K952F-KL2HK": 133,
+    "K952F-HK2KL": 107,
+    "H702F": 86,
+    "K901F": 41,
 }
 
 TUNNELS = {
