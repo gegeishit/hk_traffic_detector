@@ -90,7 +90,7 @@ Fallback behavior:
 - if ROI-area occupancy cannot be computed, the app falls back to `on_road_vehicle_count / road_capacity`
 
 Current key constants:
-- detector confidence threshold: `0.50`
+- detector confidence threshold: `0.28`
 - auto refresh: `300 seconds (5 minutes)`
 - tunnel lengths:
   - CHT: `1.86 km`
