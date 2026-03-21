@@ -9,7 +9,7 @@ The app estimates side-specific tunnel conditions by combining:
 It is designed to give a practical view of:
 - current traffic condition per tunnel side
 - estimated crossing time
-- vehicles currently counted inside the configured road ROI
+- vehicles currently detected inside the configured road ROI
 
 ## What The App Covers
 
@@ -53,12 +53,14 @@ On each refresh cycle, the app:
 2. checks whether the image is a service-unavailable screen
 3. runs vehicle detection on valid road images
 4. filters detections to the configured road ROI
-5. counts on-road vehicles and converts that into a camera-load score
+5. converts detected on-road vehicles into a road-occupancy score
 6. fetches live average traffic speed for each tunnel side from the TD XML feed
-7. derives a traffic-state label from camera load
+7. derives a traffic-state label from road occupancy
 8. adjusts speed using the traffic state
 9. calculates estimated crossing time from tunnel length and adjusted speed
 10. renders the dashboard
+
+The snapshot build currently fetches all camera images first, then fetches the XML speed feed once, and then calculates the side summaries and ETA metrics in the same refresh cycle.
 
 ## Traffic Logic
 
@@ -67,6 +69,8 @@ Core load formula:
 ```text
 road_occupancy = min(on_road_vehicle_count / road_capacity, 1.0)
 ```
+
+`road_occupancy` is kept internally as a `0..1` float and displayed in the UI as a percentage.
 
 Traffic-state bands:
 - `Clear`: load `< 0.25`
@@ -84,7 +88,7 @@ Fallback behavior:
 - if live XML speed is unavailable, the app falls back to `60 km/h`
 
 Current key constants:
-- detector confidence threshold: `0.20`
+- detector confidence threshold: `0.15`
 - auto refresh: `120 seconds`
 - tunnel lengths:
   - CHT: `1.86 km`
@@ -94,6 +98,16 @@ Current key constants:
   - CHT: `50 km/h`
   - EHC: `70 km/h`
   - WHC: `70 km/h`
+
+Current road capacities:
+- CHT `HK -> KL` (`K107F-HK2KL`): `174`
+- CHT `KL -> HK` (`K107F-KL2HK`): `171`
+- EHC `HK -> KL` (`K952F-HK2KL`): `107`
+- EHC `KL -> HK` (`K952F-KL2HK`): `133`
+- WHC `HK -> KL` (`H702F`): `86`
+- WHC `KL -> HK` (`K901F`): `41`
+
+These capacities are currently based on measured visible road length and lane count, using a `7m` effective vehicle spacing assumption.
 
 ## Run Locally
 
