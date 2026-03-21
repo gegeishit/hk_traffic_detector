@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - optional until dependency is installed
     cv2 = None
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageDraw, UnidentifiedImageError
 import requests
 import streamlit as st
 import torch
@@ -69,14 +69,7 @@ ANNOTATION_COLORS = {
     "truck": (220, 38, 38),
     "motorcycle": (16, 185, 129),
 }
-ANNOTATION_SHORT_LABELS = {
-    "car": "car",
-    "bus": "bus",
-    "truck": "truck",
-    "motorcycle": "motorcycle",
-}
 ANNOTATION_BOX_ALPHA = 150
-ANNOTATION_LABEL_ALPHA = 128
 ANNOTATION_MASK_ALPHA = 52
 ANNOTATION_MASK_CORE_ALPHA = 88
 MASK_CORRECTION_KERNEL_SIZE = 5
@@ -841,17 +834,10 @@ def annotate_image(
 
     overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
-    label_draw_instructions: list[tuple[tuple[int, int], str]] = []
-    draw = ImageDraw.Draw(annotated)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 7)
-    except OSError:
-        font = ImageFont.load_default()
 
     for detection in display_detections:
         color = ANNOTATION_COLORS.get(detection["label"], (220, 38, 38))
         box_color = (*color, ANNOTATION_BOX_ALPHA)
-        label_color = (*color, ANNOTATION_LABEL_ALPHA)
         mask_color = (*color, ANNOTATION_MASK_ALPHA)
         core_mask_color = (*color, ANNOTATION_MASK_CORE_ALPHA)
 
@@ -860,7 +846,6 @@ def annotate_image(
         ymin = box["ymin"]
         xmax = box["xmax"]
         ymax = box["ymax"]
-        caption = ANNOTATION_SHORT_LABELS.get(detection["label"], detection["label"].title())
 
         box_width = max(xmax - xmin, 1)
         box_height = max(ymax - ymin, 1)
@@ -879,24 +864,8 @@ def annotate_image(
         overlay_draw.rounded_rectangle(inner_box, radius=corner_radius, fill=mask_color)
         overlay_draw.rounded_rectangle(core_box, radius=max(3, corner_radius - 1), fill=core_mask_color)
         overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=2)
-        if hasattr(draw, "textbbox"):
-            text_bbox = draw.textbbox((xmin, ymin), caption, font=font)
-        else:
-            text_width, text_height = draw.textsize(caption, font=font)
-            text_bbox = (xmin, ymin, xmin + text_width, ymin + text_height)
-        background = (
-            text_bbox[0],
-            text_bbox[1],
-            text_bbox[2] + 1,
-            text_bbox[3],
-        )
-        overlay_draw.rectangle(background, fill=label_color)
-        label_draw_instructions.append(((xmin, ymin), caption))
 
     annotated = Image.alpha_composite(annotated, overlay)
-    final_draw = ImageDraw.Draw(annotated)
-    for position, caption in label_draw_instructions:
-        final_draw.text(position, caption, fill=(255, 255, 255), font=font)
     return annotated.convert("RGB")
 
 
