@@ -9,11 +9,6 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import altair as alt
-try:
-    import cv2
-except ImportError:  # pragma: no cover - optional until dependency is installed
-    cv2 = None
-import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, UnidentifiedImageError
 import requests
@@ -70,8 +65,6 @@ ANNOTATION_COLORS = {
     "motorcycle": (70, 255, 140),
 }
 ANNOTATION_BOX_ALPHA = 235
-MASK_CORRECTION_KERNEL_SIZE = 5
-MASK_CORRECTION_ITERATIONS = 1
 
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 60.0,
@@ -387,10 +380,6 @@ def compute_road_occupancy(
     if not polygon or not detector_available or on_road_vehicle_count == 0:
         return 0.0
 
-    occupancy_ratio = compute_segmentation_occupancy_ratio(image, polygon, on_road_detections)
-    if occupancy_ratio is not None:
-        return occupancy_ratio
-
     if not road_capacity:
         return 0.0
 
@@ -622,207 +611,6 @@ def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
     return inter_area / union_area
 
 
-def clip_box_to_image(
-    box: dict[str, int],
-    image_size: tuple[int, int],
-) -> dict[str, int] | None:
-    image_width, image_height = image_size
-    xmin = max(0, min(int(box["xmin"]), image_width - 1))
-    ymin = max(0, min(int(box["ymin"]), image_height - 1))
-    xmax = max(xmin + 1, min(int(box["xmax"]), image_width))
-    ymax = max(ymin + 1, min(int(box["ymax"]), image_height))
-    if xmax <= xmin or ymax <= ymin:
-        return None
-    return {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
-
-
-def expand_box(
-    box: dict[str, int],
-    image_size: tuple[int, int],
-    margin_ratio: float = 0.12,
-    min_margin_px: int = 4,
-) -> dict[str, int] | None:
-    clipped_box = clip_box_to_image(box, image_size)
-    if clipped_box is None:
-        return None
-    box_width = clipped_box["xmax"] - clipped_box["xmin"]
-    box_height = clipped_box["ymax"] - clipped_box["ymin"]
-    margin_x = max(min_margin_px, int(box_width * margin_ratio))
-    margin_y = max(min_margin_px, int(box_height * margin_ratio))
-    return clip_box_to_image(
-        {
-            "xmin": clipped_box["xmin"] - margin_x,
-            "ymin": clipped_box["ymin"] - margin_y,
-            "xmax": clipped_box["xmax"] + margin_x,
-            "ymax": clipped_box["ymax"] + margin_y,
-        },
-        image_size,
-    )
-
-
-def polygon_mask(
-    image_size: tuple[int, int],
-    polygon: list[tuple[int, int]],
-) -> np.ndarray | None:
-    if cv2 is None or len(polygon) < 3:
-        return None
-    image_width, image_height = image_size
-    mask = np.zeros((image_height, image_width), dtype=np.uint8)
-    points = np.array(polygon, dtype=np.int32)
-    cv2.fillPoly(mask, [points], 1)
-    return mask.astype(bool)
-
-
-def segment_detection_mask(
-    image_bgr: np.ndarray,
-    box: dict[str, int],
-) -> np.ndarray | None:
-    if cv2 is None:
-        return None
-
-    image_height, image_width = image_bgr.shape[:2]
-    expanded_box = expand_box(box, (image_width, image_height))
-    clipped_box = clip_box_to_image(box, (image_width, image_height))
-    if expanded_box is None or clipped_box is None:
-        return None
-
-    crop = image_bgr[
-        expanded_box["ymin"]:expanded_box["ymax"],
-        expanded_box["xmin"]:expanded_box["xmax"],
-    ]
-    if crop.size == 0:
-        return None
-
-    rect_x = clipped_box["xmin"] - expanded_box["xmin"]
-    rect_y = clipped_box["ymin"] - expanded_box["ymin"]
-    rect_w = clipped_box["xmax"] - clipped_box["xmin"]
-    rect_h = clipped_box["ymax"] - clipped_box["ymin"]
-    if rect_w <= 2 or rect_h <= 2:
-        return None
-
-    grabcut_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
-    bg_model = np.zeros((1, 65), np.float64)
-    fg_model = np.zeros((1, 65), np.float64)
-
-    try:
-        cv2.grabCut(
-            crop,
-            grabcut_mask,
-            (rect_x, rect_y, rect_w, rect_h),
-            bg_model,
-            fg_model,
-            1,
-            cv2.GC_INIT_WITH_RECT,
-        )
-    except cv2.error:
-        return None
-
-    foreground = np.isin(grabcut_mask, (cv2.GC_FGD, cv2.GC_PR_FGD))
-    if not foreground.any():
-        return None
-
-    full_mask = np.zeros((image_height, image_width), dtype=bool)
-    full_mask[
-        expanded_box["ymin"]:expanded_box["ymax"],
-        expanded_box["xmin"]:expanded_box["xmax"],
-    ] = foreground
-    return full_mask
-
-
-def apply_mask_correction(mask: np.ndarray) -> np.ndarray:
-    if cv2 is None or not np.any(mask):
-        return mask
-
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (MASK_CORRECTION_KERNEL_SIZE, MASK_CORRECTION_KERNEL_SIZE),
-    )
-    corrected_mask = cv2.dilate(
-        mask.astype(np.uint8),
-        kernel,
-        iterations=MASK_CORRECTION_ITERATIONS,
-    )
-    return corrected_mask.astype(bool)
-
-
-def mask_outline_paths(mask: np.ndarray, min_area_px: float = 12.0) -> list[list[tuple[int, int]]]:
-    if cv2 is None or not np.any(mask):
-        return []
-
-    contours, _ = cv2.findContours(
-        mask.astype(np.uint8),
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE,
-    )
-    outline_paths: list[list[tuple[int, int]]] = []
-    for contour in contours:
-        if cv2.contourArea(contour) < min_area_px:
-            continue
-        points = [(int(point[0][0]), int(point[0][1])) for point in contour]
-        if len(points) >= 2:
-            outline_paths.append(points)
-    return outline_paths
-
-
-def refine_detections_with_masks(
-    image: Image.Image | None,
-    detections: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if cv2 is None or image is None or not detections:
-        return detections
-
-    image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    refined_detections: list[dict[str, Any]] = []
-    for detection in detections:
-        refined_detection = dict(detection)
-        detection_mask = segment_detection_mask(image_bgr, detection["box"])
-        if detection_mask is not None:
-            corrected_mask = apply_mask_correction(detection_mask)
-            outline_paths = mask_outline_paths(corrected_mask)
-            if outline_paths:
-                refined_detection["refined_mask"] = corrected_mask
-                refined_detection["refined_outline_paths"] = outline_paths
-        refined_detections.append(refined_detection)
-    return refined_detections
-
-
-def compute_segmentation_occupancy_ratio(
-    image: Image.Image | None,
-    polygon: list[tuple[int, int]],
-    detections: list[dict[str, Any]],
-) -> float | None:
-    if cv2 is None or image is None or not polygon or not detections:
-        return None
-
-    roi_mask = polygon_mask(image.size, polygon)
-    if roi_mask is None:
-        return None
-    roi_area = int(np.count_nonzero(roi_mask))
-    if roi_area <= 0:
-        return None
-
-    image_bgr: np.ndarray | None = None
-    vehicle_mask = np.zeros(roi_mask.shape, dtype=bool)
-    any_segmented = False
-    for detection in detections:
-        detection_mask = detection.get("refined_mask")
-        if detection_mask is None:
-            if image_bgr is None:
-                image_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-            raw_mask = segment_detection_mask(image_bgr, detection["box"])
-            detection_mask = apply_mask_correction(raw_mask) if raw_mask is not None else None
-        if detection_mask is None:
-            continue
-        vehicle_mask |= detection_mask
-        any_segmented = True
-
-    if not any_segmented:
-        return None
-
-    occupied_pixels = int(np.count_nonzero(vehicle_mask & roi_mask))
-    return round(min(max(occupied_pixels / roi_area, 0.0), 1.0), 3)
-
-
 def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(detections) <= 1:
         return detections
@@ -892,13 +680,6 @@ def annotate_image(
         box_width = max(xmax - xmin, 1)
         box_height = max(ymax - ymin, 1)
         corner_radius = max(3, min(box_width, box_height) // 8)
-
-        outline_paths = detection.get("refined_outline_paths", [])
-        if outline_paths:
-            for path in outline_paths:
-                overlay_draw.line(path + [path[0]], fill=box_color, width=1)
-            continue
-
         overlay_draw.rounded_rectangle((xmin, ymin, xmax, ymax), radius=corner_radius, outline=box_color, width=1)
 
     annotated = Image.alpha_composite(annotated, overlay)
@@ -1375,11 +1156,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 roi_configured = bool(polygon)
                 road_capacity = ROAD_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
-                refined_on_road_detections = (
-                    refine_detections_with_masks(image, on_road_detections)
-                    if analysis_enabled and image is not None
-                    else on_road_detections
-                )
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
                 )
@@ -1392,7 +1168,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         image=image,
                         polygon=polygon,
                         road_capacity=road_capacity,
-                        on_road_detections=refined_on_road_detections,
+                        on_road_detections=on_road_detections,
                         on_road_vehicle_count=len(on_road_detections),
                         large_vehicle_spike_flag=large_vehicle_spike_flag,
                         detector_available=detector_available,
@@ -1424,7 +1200,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 if analysis_enabled and image is not None:
                     annotated_image = annotate_image(
                         image,
-                        refined_on_road_detections,
+                        on_road_detections,
                         polygon,
                     )
 
