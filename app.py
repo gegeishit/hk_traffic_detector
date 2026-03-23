@@ -38,7 +38,7 @@ DETECTOR_NMS_IOU_THRESHOLD = 0.50
 DETECTOR_MODEL_ID = "Gegeishit/yolos-small-hk-traffic-finetuned"
 TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
-TREND_BUCKET_SECONDS = 2 * 60
+TREND_BUCKET_SECONDS = 5 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 SPIKE_DOMINANCE_THRESHOLD = 0.58
 LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
@@ -1414,7 +1414,7 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
 
 def render_trend_chart(snapshot_time: float) -> None:
     st.subheader("Flow Timeline (Last 4 Hours)")
-    st.caption("Live tunnel-status timeline in 2-minute blocks: Clear, Busy but moving, Slowing, Congested.")
+    st.caption("Live tunnel-status timeline in 5-minute blocks: Clear, Busy but moving, Slowing, Congested.")
 
     trend_df = build_trend_dataframe(snapshot_time)
     if trend_df.empty:
