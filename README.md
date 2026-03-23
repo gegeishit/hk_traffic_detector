@@ -87,7 +87,6 @@ Speed adjustment factors:
 
 Fallback behavior:
 - if live XML speed is unavailable, the app falls back to `60 km/h`
-- if ROI-area occupancy cannot be computed, the app falls back to `on_road_vehicle_count / road_capacity`
 
 Current key constants:
 - detector confidence threshold: `0.28`
@@ -100,16 +99,6 @@ Current key constants:
   - CHT: `50 km/h`
   - EHC: `70 km/h`
   - WHC: `70 km/h`
-
-Configured road capacities (fallback/reference):
-- CHT `HK -> KL` (`K107F-HK2KL`): `174`
-- CHT `KL -> HK` (`K107F-KL2HK`): `171`
-- EHC `HK -> KL` (`K952F-HK2KL`): `86`
-- EHC `KL -> HK` (`K952F-KL2HK`): `133`
-- WHC `HK -> KL` (`H702F`): `86`
-- WHC `KL -> HK` (`K901F`): `41`
-
-These capacities are currently based on measured visible road length and lane count, using a `7m` effective vehicle spacing assumption.
 
 ## Run Locally
 

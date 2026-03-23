@@ -40,8 +40,6 @@ TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 5 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
-SPIKE_DOMINANCE_THRESHOLD = 0.58
-LARGE_VEHICLE_NEAR_CAMERA_RATIO = 0.66
 OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
@@ -53,7 +51,6 @@ SERVICE_SCREEN_LABELS = {
     "a traffic CCTV camera view of a road": False,
 }
 SERVICE_SCREEN_THRESHOLD = 0.55
-LARGE_VEHICLE_LABELS = {"bus", "truck", "tractor", "multiaxle"}
 DETECTOR_VEHICLE_LABELS = {
     "bus",
     "car",
@@ -108,7 +105,6 @@ BASELINE_SEGMENT_IDS = {
         "Kowloon": "106785",
     },
 }
-LARGE_VEHICLE_COUNT_PENALTY = 0.15
 HONG_KONG_TZ = ZoneInfo("Asia/Hong_Kong")
 
 CAMERA_SOURCE_URLS = {
@@ -131,15 +127,6 @@ TUNNEL_LOGO_PATHS = {
     "Cross Harbour Tunnel": "images/CHT.avif",
     "Eastern Harbour Crossing": "images/EHC.avif",
     "Western Harbour Crossing": "images/WHC.avif",
-}
-
-ROAD_CAPACITY_BY_CAMERA = {
-    "K107F-KL2HK": 171,
-    "K107F-HK2KL": 174,
-    "K952F-KL2HK": 133,
-    "K952F-HK2KL": 86,
-    "H702F": 86,
-    "K901F": 41,
 }
 
 TUNNELS = {
@@ -338,45 +325,11 @@ def get_camera_flow_history(camera_id: str, current_bucket: int | None = None) -
     return [entry for entry in history if entry["timestamp"] < current_bucket]
 
 
-def is_large_vehicle_spike(
-    detections: list[dict[str, Any]],
-    image_size: tuple[int, int] | None,
-) -> bool:
-    if not detections or image_size is None:
-        return False
-
-    box_areas = []
-    for detection in detections:
-        box = detection["box"]
-        box_width = max(box["xmax"] - box["xmin"], 1)
-        box_height = max(box["ymax"] - box["ymin"], 1)
-        box_areas.append((box_width * box_height, detection))
-
-    total_box_area = sum(area for area, _ in box_areas)
-    if total_box_area <= 0:
-        return False
-
-    dominant_box_area, dominant_detection = max(box_areas, key=lambda item: item[0])
-    _, center_y = box_center(dominant_detection["box"])
-    vertical_ratio = center_y / max(image_size[1], 1)
-    image_area = max(image_size[0] * image_size[1], 1)
-    area_share = dominant_box_area / total_box_area
-    image_area_ratio = dominant_box_area / image_area
-    return (
-        dominant_detection["label"] in LARGE_VEHICLE_LABELS
-        and vertical_ratio >= LARGE_VEHICLE_NEAR_CAMERA_RATIO
-        and area_share >= SPIKE_DOMINANCE_THRESHOLD
-        and image_area_ratio >= 0.03
-    )
-
-
 def compute_road_occupancy(
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
-    road_capacity: int | None,
     on_road_detections: list[dict[str, Any]],
     on_road_vehicle_count: int,
-    large_vehicle_spike_flag: bool,
     detector_available: bool,
 ) -> float:
     if not polygon or not detector_available or on_road_vehicle_count == 0:
@@ -401,14 +354,7 @@ def compute_road_occupancy(
             covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
             bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
             return round(bbox_occupancy_ratio, 3)
-
-    if not road_capacity:
-        return 0.0
-
-    count_score = min(on_road_vehicle_count / road_capacity, 1.0)
-    if large_vehicle_spike_flag and on_road_vehicle_count <= 2:
-        count_score -= LARGE_VEHICLE_COUNT_PENALTY
-    return round(min(max(count_score, 0.0), 1.0), 3)
+    return 0.0
 
 
 def derive_camera_flow_metrics(
@@ -1211,24 +1157,17 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 all_detections = detect_vehicles(image, detector) if analysis_enabled else []
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
-                road_capacity = ROAD_CAPACITY_BY_CAMERA.get(camera_id)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
                 on_road_vehicle_count = len(on_road_detections)
                 on_road_vehicle_types = dict(
                     sorted(Counter(detection["label"] for detection in on_road_detections).items())
                 )
-                large_vehicle_spike_flag = is_large_vehicle_spike(
-                    on_road_detections,
-                    image.size if analysis_enabled else None,
-                )
                 road_occupancy = (
                     compute_road_occupancy(
                         image=image,
                         polygon=polygon,
-                        road_capacity=road_capacity,
                         on_road_detections=on_road_detections,
                         on_road_vehicle_count=on_road_vehicle_count,
-                        large_vehicle_spike_flag=large_vehicle_spike_flag,
                         detector_available=detector_available,
                     )
                     if analysis_enabled
