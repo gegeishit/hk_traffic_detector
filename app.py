@@ -1,6 +1,5 @@
 import base64
 import json
-from collections import Counter
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -33,8 +32,7 @@ REQUEST_TIMEOUT_SECONDS = 10
 IMAGE_CACHE_TTL_SECONDS = 60
 DETECTOR_FEED_CACHE_TTL_SECONDS = 60
 AUTO_REFRESH_INTERVAL_MS = 300_000
-DETECTOR_CONFIDENCE_THRESHOLD = 0.25
-DETECTOR_NMS_IOU_THRESHOLD = 0.50
+DETECTOR_CONFIDENCE_THRESHOLD = 0.60
 DETECTOR_MODEL_ID = "Gegeishit/yolos-small-hktd-cctv-finetuned"
 TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
@@ -536,7 +534,7 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
             }
         )
 
-    return dedupe_vehicle_detections(detections)
+    return detections
 
 def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]]) -> bool:
     x, y = point
@@ -631,26 +629,6 @@ def box_intersects_polygon(box: dict[str, float], polygon: list[tuple[int, int]]
     )
 
 
-def box_iou(box_a: dict[str, float], box_b: dict[str, float]) -> float:
-    inter_xmin = max(box_a["xmin"], box_b["xmin"])
-    inter_ymin = max(box_a["ymin"], box_b["ymin"])
-    inter_xmax = min(box_a["xmax"], box_b["xmax"])
-    inter_ymax = min(box_a["ymax"], box_b["ymax"])
-
-    inter_width = max(inter_xmax - inter_xmin, 0.0)
-    inter_height = max(inter_ymax - inter_ymin, 0.0)
-    inter_area = inter_width * inter_height
-    if inter_area <= 0:
-        return 0.0
-
-    area_a = max(box_a["xmax"] - box_a["xmin"], 0.0) * max(box_a["ymax"] - box_a["ymin"], 0.0)
-    area_b = max(box_b["xmax"] - box_b["xmin"], 0.0) * max(box_b["ymax"] - box_b["ymin"], 0.0)
-    union_area = area_a + area_b - inter_area
-    if union_area <= 0:
-        return 0.0
-    return inter_area / union_area
-
-
 def clip_box_to_image(
     box: dict[str, float],
     image_size: tuple[int, int],
@@ -685,20 +663,6 @@ def expand_box_for_occupancy(
         },
         image_size,
     )
-
-
-def dedupe_vehicle_detections(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(detections) <= 1:
-        return detections
-
-    kept: list[dict[str, Any]] = []
-    for detection in sorted(detections, key=lambda item: item["score"], reverse=True):
-        if any(box_iou(detection["box"], existing["box"]) >= DETECTOR_NMS_IOU_THRESHOLD for existing in kept):
-            continue
-        kept.append(detection)
-    return kept
-
-
 def roi_for_camera(camera_id: str) -> list[tuple[int, int]]:
     polygon = ROAD_ROIS.get(camera_id, [])
     return polygon if len(polygon) >= 3 else []
@@ -807,13 +771,6 @@ def format_duration(seconds: int | None) -> str:
         return "No data"
     minutes, remainder = divmod(max(int(seconds), 0), 60)
     return f"{minutes}m {remainder}s"
-
-
-def format_vehicle_type_counts(vehicle_counts: dict[str, int]) -> str:
-    if not vehicle_counts:
-        return "0"
-    total_vehicle_count = sum(int(count) for count in vehicle_counts.values())
-    return str(total_vehicle_count)
 
 
 def fixed_baseline_seconds(tunnel: str) -> int:
@@ -1224,13 +1181,11 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 service_unavailable_detected, service_check_result = detect_service_unavailable(image, service_classifier)
                 analysis_enabled = image is not None and not service_unavailable_detected
                 all_detections = detect_vehicles(image, detector) if analysis_enabled else []
+                all_vehicle_count = len(all_detections)
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
                 on_road_detections = filter_detections_to_road(all_detections, polygon)
                 on_road_vehicle_count = len(on_road_detections)
-                on_road_vehicle_types = dict(
-                    sorted(Counter(detection["label"] for detection in on_road_detections).items())
-                )
                 road_occupancy = (
                     compute_road_occupancy(
                         image=image,
@@ -1284,8 +1239,8 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "analysis_enabled": analysis_enabled,
                         "service_unavailable_detected": service_unavailable_detected,
                         "service_check_result": service_check_result,
+                        "all_vehicle_count": all_vehicle_count,
                         "on_road_vehicle_count": on_road_vehicle_count,
-                        "on_road_vehicle_types": on_road_vehicle_types,
                         "road_occupancy": road_occupancy,
                         "recent_road_occupancy": recent_road_occupancy,
                         "roi_configured": roi_configured,
@@ -1641,7 +1596,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     )
     st.caption(
         f"Snapshot captured at {datetime.fromtimestamp(snapshot_time, HONG_KONG_TZ).strftime('%Y-%m-%d %H:%M:%S')} HKT "
-        f"({'Auto refresh every 2 min' if STREAMLIT_FRAGMENT is not None or st_autorefresh is not None else 'Auto refresh unavailable'})"
+        f"({'Auto refresh every 5 min' if STREAMLIT_FRAGMENT is not None or st_autorefresh is not None else 'Auto refresh unavailable'})"
     )
     render_top_bar(snapshot_time, st.session_state.get("model_errors", {}), records_by_tunnel)
     render_trend_chart(snapshot_time)
@@ -1693,7 +1648,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             st.caption(baseline_caption(summary))
 
                         if primary_record is None or primary_record["image"] is None:
-                            st.write("**Side flow:** N/A  \n**Vehicles detected:** N/A")
+                            st.write("**Side flow:** N/A  \n**All vehicles detected:** N/A  \n**Vehicles in ROI:** N/A")
                         elif not primary_record["roi_configured"]:
                             st.info("ROI not configured; excluded from road-flow calculation.")
                         elif not primary_record["analysis_enabled"]:
@@ -1710,7 +1665,8 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             st.markdown(
                                 f"**Side flow:** {primary_record['camera_flow_state']}  \n"
                                 f"**Road occupancy:** {road_occupancy_text}  \n"
-                                f"**Vehicles detected:** {format_vehicle_type_counts(primary_record['on_road_vehicle_types'])}"
+                                f"**All vehicles detected:** {primary_record['all_vehicle_count']}  \n"
+                                f"**Vehicles in ROI:** {primary_record['on_road_vehicle_count']}"
                             )
 
                     with image_column:
