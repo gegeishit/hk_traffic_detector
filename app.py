@@ -742,10 +742,9 @@ def format_duration(seconds: int | None) -> str:
 
 def format_vehicle_type_counts(vehicle_counts: dict[str, int]) -> str:
     if not vehicle_counts:
-        return "none"
+        return "0"
     total_vehicle_count = sum(int(count) for count in vehicle_counts.values())
-    noun = "vehicle" if total_vehicle_count == 1 else "vehicles"
-    return f"{noun} {total_vehicle_count}"
+    return str(total_vehicle_count)
 
 
 def fixed_baseline_seconds(tunnel: str) -> int:
