@@ -33,7 +33,7 @@ REQUEST_TIMEOUT_SECONDS = 10
 IMAGE_CACHE_TTL_SECONDS = 60
 DETECTOR_FEED_CACHE_TTL_SECONDS = 60
 AUTO_REFRESH_INTERVAL_MS = 300_000
-DETECTOR_CONFIDENCE_THRESHOLD = 0.28
+DETECTOR_CONFIDENCE_THRESHOLD = 0.20
 DETECTOR_NMS_IOU_THRESHOLD = 0.50
 DETECTOR_MODEL_ID = "Gegeishit/yolos-small-hktd-cctv-finetuned"
 TREND_WINDOW_SECONDS = 4 * 60 * 60
@@ -555,8 +555,80 @@ def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]])
     return inside
 
 
-def box_center(box: dict[str, int]) -> tuple[float, float]:
-    return ((box["xmin"] + box["xmax"]) / 2.0, (box["ymin"] + box["ymax"]) / 2.0)
+def point_in_box(point: tuple[float, float], box: dict[str, int]) -> bool:
+    x, y = point
+    return box["xmin"] <= x <= box["xmax"] and box["ymin"] <= y <= box["ymax"]
+
+
+def polygon_edges(polygon: list[tuple[int, int]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    return [
+        (polygon[index], polygon[(index + 1) % len(polygon)])
+        for index in range(len(polygon))
+    ]
+
+
+def segments_intersect(
+    start_a: tuple[int, int],
+    end_a: tuple[int, int],
+    start_b: tuple[int, int],
+    end_b: tuple[int, int],
+) -> bool:
+    def orientation(p: tuple[int, int], q: tuple[int, int], r: tuple[int, int]) -> int:
+        value = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+        if value == 0:
+            return 0
+        return 1 if value > 0 else 2
+
+    def on_segment(p: tuple[int, int], q: tuple[int, int], r: tuple[int, int]) -> bool:
+        return (
+            min(p[0], r[0]) <= q[0] <= max(p[0], r[0])
+            and min(p[1], r[1]) <= q[1] <= max(p[1], r[1])
+        )
+
+    orientation_1 = orientation(start_a, end_a, start_b)
+    orientation_2 = orientation(start_a, end_a, end_b)
+    orientation_3 = orientation(start_b, end_b, start_a)
+    orientation_4 = orientation(start_b, end_b, end_a)
+
+    if orientation_1 != orientation_2 and orientation_3 != orientation_4:
+        return True
+
+    if orientation_1 == 0 and on_segment(start_a, start_b, end_a):
+        return True
+    if orientation_2 == 0 and on_segment(start_a, end_b, end_a):
+        return True
+    if orientation_3 == 0 and on_segment(start_b, start_a, end_b):
+        return True
+    if orientation_4 == 0 and on_segment(start_b, end_a, end_b):
+        return True
+
+    return False
+
+
+def box_intersects_polygon(box: dict[str, int], polygon: list[tuple[int, int]]) -> bool:
+    box_corners = [
+        (box["xmin"], box["ymin"]),
+        (box["xmax"], box["ymin"]),
+        (box["xmax"], box["ymax"]),
+        (box["xmin"], box["ymax"]),
+    ]
+    if any(point_in_polygon(corner, polygon) for corner in box_corners):
+        return True
+    if any(point_in_box(point, box) for point in polygon):
+        return True
+
+    box_edges = [
+        (box_corners[0], box_corners[1]),
+        (box_corners[1], box_corners[2]),
+        (box_corners[2], box_corners[3]),
+        (box_corners[3], box_corners[0]),
+    ]
+    roi_edges = polygon_edges(polygon)
+    return any(
+        segments_intersect(box_start, box_end, roi_start, roi_end)
+        for box_start, box_end in box_edges
+        for roi_start, roi_end in roi_edges
+    )
 
 
 def box_iou(box_a: dict[str, int], box_b: dict[str, int]) -> float:
@@ -642,7 +714,7 @@ def filter_detections_to_road(
     return [
         detection
         for detection in detections
-        if point_in_polygon(box_center(detection["box"]), polygon)
+        if box_intersects_polygon(detection["box"], polygon)
     ]
 
 
