@@ -512,10 +512,10 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
             label = str(result.get("label", "")).lower().strip()
             score = float(result.get("score", 0.0) or 0.0)
             box = result.get("box", {}) or {}
-            xmin = int(float(box.get("xmin", 0)))
-            ymin = int(float(box.get("ymin", 0)))
-            xmax = int(float(box.get("xmax", 0)))
-            ymax = int(float(box.get("ymax", 0)))
+            xmin = float(box.get("xmin", 0))
+            ymin = float(box.get("ymin", 0))
+            xmax = float(box.get("xmax", 0))
+            ymax = float(box.get("ymax", 0))
         except (AttributeError, TypeError, ValueError):
             continue
 
@@ -554,7 +554,7 @@ def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]])
     return inside
 
 
-def point_in_box(point: tuple[float, float], box: dict[str, int]) -> bool:
+def point_in_box(point: tuple[float, float], box: dict[str, float]) -> bool:
     x, y = point
     return box["xmin"] <= x <= box["xmax"] and box["ymin"] <= y <= box["ymax"]
 
@@ -604,7 +604,7 @@ def segments_intersect(
     return False
 
 
-def box_intersects_polygon(box: dict[str, int], polygon: list[tuple[int, int]]) -> bool:
+def box_intersects_polygon(box: dict[str, float], polygon: list[tuple[int, int]]) -> bool:
     box_corners = [
         (box["xmin"], box["ymin"]),
         (box["xmax"], box["ymin"]),
@@ -631,7 +631,7 @@ def box_intersects_polygon(box: dict[str, int], polygon: list[tuple[int, int]]) 
 
 
 def clip_box_to_image(
-    box: dict[str, int],
+    box: dict[str, float],
     image_size: tuple[int, int],
 ) -> dict[str, int] | None:
     image_width, image_height = image_size
@@ -645,7 +645,7 @@ def clip_box_to_image(
 
 
 def expand_box_for_occupancy(
-    box: dict[str, int],
+    box: dict[str, float],
     image_size: tuple[int, int],
 ) -> dict[str, int] | None:
     clipped_box = clip_box_to_image(box, image_size)
