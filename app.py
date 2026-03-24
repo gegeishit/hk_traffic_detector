@@ -163,21 +163,10 @@ def init_session_state() -> None:
     persisted_history = load_persisted_history()
     if "traffic_status_history" not in st.session_state:
         st.session_state.traffic_status_history = persisted_history.get("traffic_status_history", [])
-    if "camera_flow_history" not in st.session_state:
-        st.session_state.camera_flow_history = persisted_history.get("camera_flow_history", {})
 
 
 def prune_history_rows(history: list[dict[str, Any]], cutoff: int) -> list[dict[str, Any]]:
     return [row for row in history if int(row.get("timestamp", 0)) >= cutoff]
-
-
-def prune_camera_history(history_by_camera: dict[str, list[dict[str, Any]]], cutoff: int) -> dict[str, list[dict[str, Any]]]:
-    pruned_history = {}
-    for camera_url, entries in history_by_camera.items():
-        kept_entries = prune_history_rows(entries, cutoff)
-        if kept_entries:
-            pruned_history[camera_url] = kept_entries
-    return pruned_history
 
 
 def load_persisted_history() -> dict[str, Any]:
@@ -191,10 +180,8 @@ def load_persisted_history() -> dict[str, Any]:
 
     cutoff = bucket_timestamp(datetime.now().timestamp()) - TREND_WINDOW_SECONDS
     traffic_history = payload.get("traffic_status_history", [])
-    camera_flow_history = payload.get("camera_flow_history", {})
     return {
         "traffic_status_history": prune_history_rows(traffic_history, cutoff),
-        "camera_flow_history": prune_camera_history(camera_flow_history, cutoff),
     }
 
 
@@ -203,10 +190,6 @@ def persist_history() -> None:
     payload = {
         "traffic_status_history": prune_history_rows(
             st.session_state.get("traffic_status_history", []),
-            cutoff,
-        ),
-        "camera_flow_history": prune_camera_history(
-            st.session_state.get("camera_flow_history", {}),
             cutoff,
         ),
     }
@@ -318,14 +301,6 @@ def band_to_status_label(status_band: int) -> str:
         2: "Slowing",
         3: "Congested",
     }[status_band]
-
-
-def get_camera_flow_history(camera_id: str, current_bucket: int | None = None) -> list[dict[str, Any]]:
-    history_by_camera = st.session_state.get("camera_flow_history", {})
-    history = list(history_by_camera.get(camera_id, []))
-    if current_bucket is None:
-        return history
-    return [entry for entry in history if entry["timestamp"] < current_bucket]
 
 
 def build_roi_mask(
@@ -760,28 +735,9 @@ def side_direction_label(side: str) -> str:
     return side
 
 
-def status_color(flow_label: str) -> str:
-    if flow_label == "Clear":
-        return "#68d391"
-    if flow_label == "Busy but moving":
-        return "#f6e05e"
-    if flow_label == "Slowing":
-        return "#f6ad55"
-    if flow_label == "Congested":
-        return "#fc8181"
-    return "#cbd5e0"
-
-
 def ordered_sides(side_map: dict[str, Any]) -> list[str]:
     side_order = {"Kowloon": 0, "Hong Kong": 1}
     return sorted(side_map.keys(), key=lambda side: (side_order.get(side, 99), side))
-
-
-def effective_speed_kmh(base_speed_kmh: float | None, flow_label: str) -> float | None:
-    if base_speed_kmh is None or base_speed_kmh <= 0:
-        return None
-    speed_factor = FLOW_SPEED_FACTORS.get(flow_label, 1.0)
-    return round(max(base_speed_kmh * speed_factor, 5.0), 1)
 
 
 def format_duration(seconds: int | None) -> str:
@@ -798,10 +754,6 @@ def fixed_baseline_seconds(tunnel: str) -> int:
     return round((TUNNEL_LENGTHS_KM[tunnel] / default_speed_kmh) * 3600)
 
 
-def default_baseline_speed_kmh(tunnel: str) -> float:
-    return round(DEFAULT_BASELINE_SPEED_KMH[tunnel], 1)
-
-
 def baseline_caption(summary: dict[str, Any]) -> str:
     speed_kmh = (
         summary.get("fetched_speed_kmh")
@@ -811,16 +763,6 @@ def baseline_caption(summary: dict[str, Any]) -> str:
     if speed_kmh is None:
         return "Avg. traffic speed: N/A"
     return f"Avg. traffic speed: {speed_kmh:.1f}km/h"
-
-
-def render_tags(tags: list[str]) -> None:
-    if not tags:
-        return
-    chips_html = "".join(
-        f"<span class='traffic-tag'>{tag}</span>"
-        for tag in tags
-    )
-    st.markdown(f"<div class='traffic-tag-row'>{chips_html}</div>", unsafe_allow_html=True)
 
 
 def render_side_badge(direction: str, status_icon: str) -> None:
@@ -902,6 +844,37 @@ def service_classifier_status(records_by_tunnel: dict[str, Any]) -> tuple[str, s
     return "All cameras are working", "#2f855a"
 
 
+def make_side_summary(
+    side: str,
+    baseline: int,
+    baseline_source: str,
+    baseline_detector_id: str,
+    baseline_speed_kmh: float | None,
+    fetched_speed_kmh: float | None,
+    default_speed_kmh: float,
+    *,
+    status_label: str,
+    flow_label: str,
+    estimated_crossing_seconds: int | None = None,
+    road_occupancy: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "side": side,
+        "direction": side_direction_label(side),
+        "baseline_seconds": baseline,
+        "baseline_source": baseline_source,
+        "baseline_detector_id": baseline_detector_id,
+        "baseline_speed_kmh": baseline_speed_kmh,
+        "fetched_speed_kmh": fetched_speed_kmh,
+        "default_baseline_speed_kmh": default_speed_kmh,
+        "estimated_crossing_seconds": estimated_crossing_seconds,
+        "status_label": status_label,
+        "status_icon": icon_for_flow_label(flow_label),
+        "flow_label": flow_label,
+        "road_occupancy": road_occupancy,
+    }
+
+
 def summarize_side(
     tunnel: str,
     side: str,
@@ -913,7 +886,7 @@ def summarize_side(
     analyzable_records = [record for record in available_records if record["analysis_enabled"]]
     calibrated_records = [record for record in analyzable_records if record["roi_configured"]]
     fallback_baseline = fixed_baseline_seconds(tunnel)
-    default_speed_kmh = default_baseline_speed_kmh(tunnel)
+    default_speed_kmh = round(DEFAULT_BASELINE_SPEED_KMH[tunnel], 1)
     dynamic_baseline, baseline_detector_id, baseline_speed_kmh, fetched_speed_kmh = dynamic_baseline_seconds(
         tunnel=tunnel,
         side=side,
@@ -922,175 +895,57 @@ def summarize_side(
     baseline = dynamic_baseline if dynamic_baseline is not None else fallback_baseline
     baseline_source = "dynamic" if dynamic_baseline is not None else "fallback"
 
+    summary_base = {
+        "side": side,
+        "baseline": baseline,
+        "baseline_source": baseline_source,
+        "baseline_detector_id": baseline_detector_id,
+        "baseline_speed_kmh": baseline_speed_kmh,
+        "fetched_speed_kmh": fetched_speed_kmh,
+        "default_speed_kmh": default_speed_kmh,
+    }
+
     if not available_records:
-        return {
-            "side": side,
-            "direction": side_direction_label(side),
-            "baseline_seconds": baseline,
-            "baseline_source": baseline_source,
-            "baseline_detector_id": baseline_detector_id,
-            "baseline_speed_kmh": baseline_speed_kmh,
-            "fetched_speed_kmh": fetched_speed_kmh,
-            "default_baseline_speed_kmh": default_speed_kmh,
-            "extra_delay_seconds": None,
-            "estimated_crossing_seconds": None,
-            "status_label": "No data",
-            "status_icon": icon_for_flow_label("No data"),
-            "flow_label": "No data",
-            "camera_count": 0,
-            "average_on_road_vehicle_count": 0.0,
-            "eta_confidence": "none",
-            "provisional_eta": False,
-            "road_occupancy": None,
-            "recent_road_occupancy": None,
-        }
+        return make_side_summary(**summary_base, status_label="No data", flow_label="No data")
 
     if analyzable_records and not calibrated_records:
-        return {
-            "side": side,
-            "direction": side_direction_label(side),
-            "baseline_seconds": baseline,
-            "baseline_source": baseline_source,
-            "baseline_detector_id": baseline_detector_id,
-            "baseline_speed_kmh": baseline_speed_kmh,
-            "fetched_speed_kmh": fetched_speed_kmh,
-            "default_baseline_speed_kmh": default_speed_kmh,
-            "extra_delay_seconds": None,
-            "estimated_crossing_seconds": None,
-            "status_label": "No calibrated road area",
-            "status_icon": icon_for_flow_label("Uncalibrated"),
-            "flow_label": "Uncalibrated",
-            "camera_count": 0,
-            "average_on_road_vehicle_count": 0.0,
-            "eta_confidence": "none",
-            "provisional_eta": False,
-            "road_occupancy": None,
-            "recent_road_occupancy": None,
-        }
+        return make_side_summary(
+            **summary_base,
+            status_label="No calibrated road area",
+            flow_label="Uncalibrated",
+        )
 
     if available_records and not analyzable_records:
-        return {
-            "side": side,
-            "direction": side_direction_label(side),
-            "baseline_seconds": baseline,
-            "baseline_source": baseline_source,
-            "baseline_detector_id": baseline_detector_id,
-            "baseline_speed_kmh": baseline_speed_kmh,
-            "fetched_speed_kmh": fetched_speed_kmh,
-            "default_baseline_speed_kmh": default_speed_kmh,
-            "extra_delay_seconds": None,
-            "estimated_crossing_seconds": None,
-            "status_label": "N/A",
-            "status_icon": "❓",
-            "flow_label": "N/A",
-            "camera_count": 0,
-            "average_on_road_vehicle_count": 0.0,
-            "eta_confidence": "none",
-            "provisional_eta": False,
-            "road_occupancy": None,
-            "recent_road_occupancy": None,
-        }
+        return make_side_summary(**summary_base, status_label="N/A", flow_label="N/A")
 
     if not detector_available:
-        return {
-            "side": side,
-            "direction": side_direction_label(side),
-            "baseline_seconds": baseline,
-            "baseline_source": baseline_source,
-            "baseline_detector_id": baseline_detector_id,
-            "baseline_speed_kmh": baseline_speed_kmh,
-            "fetched_speed_kmh": fetched_speed_kmh,
-            "default_baseline_speed_kmh": default_speed_kmh,
-            "extra_delay_seconds": None,
-            "estimated_crossing_seconds": None,
-            "status_label": "Detector unavailable",
-            "status_icon": icon_for_flow_label("No road data"),
-            "flow_label": "No road data",
-            "camera_count": len(calibrated_records),
-            "average_on_road_vehicle_count": 0.0,
-            "eta_confidence": "none",
-            "provisional_eta": False,
-            "road_occupancy": None,
-            "recent_road_occupancy": None,
-        }
+        return make_side_summary(
+            **summary_base,
+            status_label="Detector unavailable",
+            flow_label="No road data",
+        )
 
     primary_record = calibrated_records[0]
     current_load = float(primary_record["road_occupancy"])
-    total_on_road_vehicle_count = int(primary_record["on_road_vehicle_count"])
-    average_on_road_vehicle_count = float(total_on_road_vehicle_count)
     flow_label = str(primary_record["camera_flow_state"])
-    eta_confidence = "provisional" if flow_label == "Busy but moving" else "confirmed"
     base_speed_kmh = baseline_speed_kmh if baseline_speed_kmh is not None else default_speed_kmh
-    adjusted_speed_kmh = effective_speed_kmh(base_speed_kmh, flow_label)
+    adjusted_speed_kmh = (
+        round(max(base_speed_kmh * FLOW_SPEED_FACTORS.get(flow_label, 1.0), 5.0), 1)
+        if base_speed_kmh is not None and base_speed_kmh > 0
+        else None
+    )
     estimated_crossing_seconds = (
         round((TUNNEL_LENGTHS_KM[tunnel] / adjusted_speed_kmh) * 3600)
         if adjusted_speed_kmh is not None
         else None
     )
-    extra_delay_seconds = (
-        max(int(estimated_crossing_seconds - baseline), 0)
-        if estimated_crossing_seconds is not None
-        else None
+    return make_side_summary(
+        **summary_base,
+        status_label=flow_label,
+        flow_label=flow_label,
+        estimated_crossing_seconds=estimated_crossing_seconds,
+        road_occupancy=round(current_load, 3),
     )
-
-    return {
-        "side": side,
-        "direction": side_direction_label(side),
-        "baseline_seconds": baseline,
-        "baseline_source": baseline_source,
-        "baseline_detector_id": baseline_detector_id,
-        "baseline_speed_kmh": baseline_speed_kmh,
-        "fetched_speed_kmh": fetched_speed_kmh,
-        "default_baseline_speed_kmh": default_speed_kmh,
-        "effective_speed_kmh": adjusted_speed_kmh,
-        "extra_delay_seconds": extra_delay_seconds,
-        "estimated_crossing_seconds": estimated_crossing_seconds,
-        "status_label": flow_label,
-        "status_icon": icon_for_flow_label(flow_label),
-        "flow_label": flow_label,
-        "camera_count": len(calibrated_records),
-        "average_on_road_vehicle_count": round(average_on_road_vehicle_count, 1),
-        "eta_confidence": eta_confidence,
-        "provisional_eta": flow_label == "Busy but moving",
-        "road_occupancy": round(current_load, 3),
-        "recent_road_occupancy": primary_record.get("recent_road_occupancy"),
-    }
-
-
-def record_camera_flow_history(snapshot_time: float, records_by_tunnel: dict[str, Any]) -> None:
-    bucketed_time = bucket_timestamp(snapshot_time)
-    cutoff = bucketed_time - TREND_WINDOW_SECONDS
-    history_by_camera = st.session_state.get("camera_flow_history", {}).copy()
-
-    for side_records in records_by_tunnel.values():
-        for camera_records in side_records.values():
-            for record in camera_records:
-                if record["image"] is None or not record["roi_configured"] or not record["analysis_enabled"]:
-                    continue
-
-                history = [
-                    entry
-                    for entry in history_by_camera.get(record["camera_id"], [])
-                    if entry["timestamp"] >= cutoff
-                ]
-                history = [
-                    entry
-                    for entry in history
-                    if entry["timestamp"] != bucketed_time
-                ]
-                history.append(
-                    {
-                        "timestamp": bucketed_time,
-                        "on_road_vehicle_count": record["on_road_vehicle_count"],
-                        "road_occupancy": record["road_occupancy"],
-                        "camera_flow_state": record["camera_flow_state"],
-                    }
-                )
-                history.sort(key=lambda entry: entry["timestamp"])
-                history_by_camera[record["camera_id"]] = history
-
-    st.session_state.camera_flow_history = history_by_camera
-    persist_history()
 
 
 def record_traffic_status_history(snapshot_time: float, tunnel_metrics: dict[str, Any]) -> None:
@@ -1184,11 +1039,9 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
     snapshot_time = datetime.now().timestamp()
     records_by_tunnel: dict[str, Any] = {}
     tunnel_metrics: dict[str, Any] = {}
-    tunnel_active_camera_counts: dict[str, int] = {}
 
     for tunnel, sides in TUNNELS.items():
         side_records: dict[str, Any] = {}
-        active_cameras = 0
 
         for side, camera_ids in sides.items():
             camera_records = []
@@ -1220,17 +1073,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     if analysis_enabled
                     else 0.0
                 )
-                history = get_camera_flow_history(camera_id, bucket_timestamp(snapshot_time))
-                recent_road_occupancies = [
-                    float(entry["road_occupancy"])
-                    for entry in history[-2:]
-                    if entry.get("road_occupancy") is not None
-                ]
-                recent_road_occupancy = (
-                    round(sum(recent_road_occupancies) / len(recent_road_occupancies), 3)
-                    if recent_road_occupancies
-                    else None
-                )
                 camera_flow_metrics = derive_camera_flow_metrics(
                     camera_id=camera_id,
                     snapshot_time=snapshot_time,
@@ -1248,9 +1090,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         polygon,
                     )
 
-                if image is not None:
-                    active_cameras += 1
-
                 camera_records.append(
                     {
                         "camera_id": camera_id,
@@ -1265,7 +1104,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "all_vehicle_count": all_vehicle_count,
                         "on_road_vehicle_count": on_road_vehicle_count,
                         "road_occupancy": road_occupancy,
-                        "recent_road_occupancy": recent_road_occupancy,
                         "roi_configured": roi_configured,
                         **camera_flow_metrics,
                     }
@@ -1273,7 +1111,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
 
             side_records[side] = camera_records
         records_by_tunnel[tunnel] = side_records
-        tunnel_active_camera_counts[tunnel] = active_cameras
 
     detector_speed_map, detector_feed_error = load_segment_speed_map()
 
@@ -1311,7 +1148,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
         tunnel_metrics[tunnel] = {
             "status_label": trend_status_label if trend_status_label is not None else "No calibrated road data",
             "status_icon": icon_for_flow_label(trend_status_label or "No road data"),
-            "active_cameras": tunnel_active_camera_counts[tunnel],
             "trend_status_label": trend_status_label,
             "trend_status_band": trend_status_band,
             "tunnel_load": round(tunnel_score, 3) if tunnel_score is not None else None,
@@ -1708,18 +1544,15 @@ def render_live_dashboard_cycle() -> None:
     with st.spinner("Refreshing live traffic snapshot..."):
         snapshot_time, records_by_tunnel, tunnel_metrics, model_errors = build_snapshot()
     st.session_state["model_errors"] = model_errors
-    record_camera_flow_history(snapshot_time, records_by_tunnel)
     record_traffic_status_history(snapshot_time, tunnel_metrics)
     render_dashboard(snapshot_time, records_by_tunnel, tunnel_metrics)
 
 
-if STREAMLIT_FRAGMENT is not None:
-    @STREAMLIT_FRAGMENT(run_every=AUTO_REFRESH_INTERVAL_MS / 1000)
-    def render_live_dashboard_fragment() -> None:
-        render_live_dashboard_cycle()
-else:
-    def render_live_dashboard_fragment() -> None:
-        render_live_dashboard_cycle()
+render_live_dashboard_fragment = (
+    STREAMLIT_FRAGMENT(run_every=AUTO_REFRESH_INTERVAL_MS / 1000)(render_live_dashboard_cycle)
+    if STREAMLIT_FRAGMENT is not None
+    else render_live_dashboard_cycle
+)
 
 
 def main() -> None:
