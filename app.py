@@ -38,6 +38,7 @@ TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 5 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
+STYLESHEET_PATH = Path("styles.css")
 OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
 ROI_MIN_BOX_OVERLAP_RATIO = 0.40
@@ -45,6 +46,7 @@ WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
 WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
 WHC_FOREGROUND_MAX_BIG_VEHICLES = 2
 WHC_BIG_BOX_MIN_ROI_SHARE = 0.08
+WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT = 30
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -201,6 +203,13 @@ def persist_history() -> None:
         )
     except OSError:
         pass
+
+
+def load_stylesheet() -> str:
+    try:
+        return STYLESHEET_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 @st.cache_resource(show_spinner="Loading service-screen classifier...")
@@ -404,16 +413,19 @@ def compute_road_occupancy(
     if image is not None:
         roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
-            foreground_mask = whc_foreground_mask(camera_id, image.size, polygon)
-            big_foreground_indices = set(
-                whc_big_foreground_detections(
-                    camera_id,
-                    on_road_detections,
-                    roi_mask,
-                    image.size,
-                    roi_area,
+            foreground_mask = None
+            big_foreground_indices: set[int] = set()
+            if on_road_vehicle_count >= WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT:
+                foreground_mask = whc_foreground_mask(camera_id, image.size, polygon)
+                big_foreground_indices = set(
+                    whc_big_foreground_detections(
+                        camera_id,
+                        on_road_detections,
+                        roi_mask,
+                        image.size,
+                        roi_area,
+                    )
                 )
-            )
             vehicle_mask = Image.new("L", image.size, 0)
             for index, detection in enumerate(on_road_detections):
                 box = expand_box_for_occupancy(detection["box"], image.size)
@@ -1274,181 +1286,9 @@ def render_trend_chart(snapshot_time: float) -> None:
 
 
 def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tunnel_metrics: dict[str, Any]) -> None:
-    st.markdown(
-        """
-        <style>
-        .traffic-tag-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.35rem;
-            margin: 0.2rem 0 0.4rem 0;
-        }
-        .traffic-tag {
-            display: inline-flex;
-            align-items: center;
-            padding: 0.18rem 0.55rem;
-            border-radius: 999px;
-            background: #c5cfd7;
-            border: 1px solid #adb9c3;
-            color: #23313d;
-            font-size: 0.78rem;
-            line-height: 1.2;
-            white-space: nowrap;
-        }
-        .traffic-image-card {
-            display: block;
-            margin: 0.25rem 0 0.65rem 0;
-        }
-        .traffic-image-toggle {
-            position: absolute;
-            opacity: 0;
-            pointer-events: none;
-        }
-        .traffic-image-frame {
-            position: relative;
-            display: block;
-            overflow: hidden;
-            border-radius: 14px;
-            border: 1px solid #d6e1e8;
-            background: transparent;
-            cursor: zoom-in;
-        }
-        .traffic-image-frame img {
-            display: block;
-            width: 100%;
-            height: auto;
-            transition: transform 180ms ease, filter 180ms ease;
-        }
-        .traffic-image-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(20, 33, 42, 0.18);
-            color: #ffffff;
-            font-size: 0.9rem;
-            font-weight: 600;
-            letter-spacing: 0.01em;
-            opacity: 0;
-            transition: opacity 180ms ease, background 180ms ease;
-        }
-        .traffic-image-card:hover .traffic-image-frame img {
-            transform: scale(1.02);
-            filter: saturate(1.03);
-        }
-        .traffic-image-card:hover .traffic-image-overlay {
-            opacity: 1;
-            background: rgba(20, 33, 42, 0.3);
-        }
-        .traffic-image-caption {
-            margin-top: 0.35rem;
-            font-size: 0.82rem;
-            color: #4a5560;
-            line-height: 1.35;
-        }
-        .traffic-image-modal {
-            position: fixed;
-            inset: 0;
-            z-index: 9999;
-            opacity: 0;
-            visibility: hidden;
-            pointer-events: none;
-            transition: opacity 220ms ease, visibility 220ms ease;
-        }
-        .traffic-image-toggle:checked + .traffic-image-frame + .traffic-image-caption + .traffic-image-modal {
-            opacity: 1;
-            visibility: visible;
-            pointer-events: auto;
-            cursor: zoom-out;
-        }
-        .traffic-image-modal-backdrop {
-            position: absolute;
-            inset: 0;
-            background: rgba(10, 16, 24, 0.86);
-            backdrop-filter: blur(4px);
-            transition: background 220ms ease;
-        }
-        .traffic-image-modal-content {
-            position: relative;
-            z-index: 1;
-            width: min(98vw, 1600px);
-            margin: 2vh auto 0 auto;
-            padding: 0;
-            border-radius: 0;
-            background: transparent;
-            box-shadow: none;
-            transform: scale(0.94) translateY(10px);
-            transform-origin: center top;
-            transition: transform 220ms ease;
-        }
-        .traffic-image-toggle:checked + .traffic-image-frame + .traffic-image-caption + .traffic-image-modal .traffic-image-modal-content {
-            transform: scale(1) translateY(0);
-        }
-        .traffic-image-modal-content img {
-            display: block;
-            width: min(98vw, 1600px);
-            max-width: 100%;
-            max-height: 88vh;
-            height: auto;
-            margin: 0 auto;
-            border-radius: 16px;
-            box-shadow: 0 22px 80px rgba(0, 0, 0, 0.45);
-            object-fit: contain;
-        }
-        .traffic-image-modal-caption {
-            margin-top: 0.7rem;
-            text-align: center;
-            font-size: 0.9rem;
-            color: rgba(255, 255, 255, 0.88);
-            line-height: 1.35;
-        }
-        .traffic-image-modal-close {
-            margin-top: 0.45rem;
-            text-align: center;
-            font-size: 0.82rem;
-            font-weight: 600;
-            color: rgba(255, 255, 255, 0.72);
-        }
-        .tunnel-title-text {
-            display: flex;
-            align-items: center;
-            min-height: 3.1rem;
-            margin: 0;
-            font-size: 1.62rem;
-            font-weight: 700;
-            line-height: 1.15;
-            color: #ffffff;
-        }
-        .traffic-side-badge {
-            display: flex;
-            align-items: center;
-            gap: 0.45rem;
-            margin: 0.05rem 0 0.55rem 0;
-        }
-        .traffic-side-icon {
-            font-size: 1rem;
-            line-height: 1;
-        }
-        .tunnel-header-divider {
-            height: 1px;
-            margin: 0.2rem 0 0.85rem 0;
-            background: linear-gradient(90deg, rgba(177, 188, 198, 0.9), rgba(177, 188, 198, 0.35));
-        }
-        div[data-testid="stButton"] > button[kind="secondary"] {
-            background: linear-gradient(180deg, #dbe7f2 0%, #c7d7e7 100%);
-            border: 1px solid #a7bfd6;
-            color: #1f3448;
-            font-weight: 600;
-        }
-        div[data-testid="stButton"] > button[kind="secondary"]:hover {
-            border-color: #8eaac3;
-            color: #15283a;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    stylesheet = load_stylesheet()
+    if stylesheet:
+        st.markdown(f"<style>{stylesheet}</style>", unsafe_allow_html=True)
     st.markdown(
         "<h1 style='margin-bottom:0.2rem;'>🚗 Hong Kong Tunnel Traffic Monitor</h1>",
         unsafe_allow_html=True,
