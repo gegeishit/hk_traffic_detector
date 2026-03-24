@@ -43,9 +43,8 @@ OCCUPANCY_BOX_PADDING_MIN_PX = 4
 ROI_MIN_BOX_OVERLAP_RATIO = 0.40
 WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
 WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
-WHC_FOREGROUND_MIN_VERTICAL_RATIO = 0.58
-WHC_FOREGROUND_MIN_IMAGE_AREA_RATIO = 0.025
-WHC_OCCUPANCY_BOX_SHRINK_FACTOR = 0.72
+WHC_FOREGROUND_MAX_BIG_VEHICLES = 2
+WHC_BIG_BOX_MIN_ROI_SHARE = 0.08
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -356,53 +355,64 @@ def box_overlap_ratio_in_roi(
     return overlap_area / box_area
 
 
-def shrink_box(
-    box: dict[str, int],
-    shrink_factor: float,
+def box_roi_share(
+    box: dict[str, float],
+    roi_mask: Image.Image,
     image_size: tuple[int, int],
-) -> dict[str, int] | None:
-    center_x = (box["xmin"] + box["xmax"]) / 2.0
-    center_y = (box["ymin"] + box["ymax"]) / 2.0
-    half_width = (box["xmax"] - box["xmin"]) * shrink_factor / 2.0
-    half_height = (box["ymax"] - box["ymin"]) * shrink_factor / 2.0
-    return clip_box_to_image(
-        {
-            "xmin": center_x - half_width,
-            "ymin": center_y - half_height,
-            "xmax": center_x + half_width,
-            "ymax": center_y + half_height,
-        },
-        image_size,
+    roi_area: int,
+) -> float:
+    clipped_box = clip_box_to_image(box, image_size)
+    if clipped_box is None or roi_area <= 0:
+        return 0.0
+    overlap_crop = roi_mask.crop(
+        (clipped_box["xmin"], clipped_box["ymin"], clipped_box["xmax"], clipped_box["ymax"])
     )
+    overlap_area = sum(overlap_crop.histogram()[1:])
+    return overlap_area / roi_area
 
 
-def adjusted_occupancy_box(
+def whc_foreground_mask(
     camera_id: str,
-    detection: dict[str, Any],
     image_size: tuple[int, int],
-) -> dict[str, int] | None:
-    occupancy_box = expand_box_for_occupancy(detection["box"], image_size)
-    if occupancy_box is None:
+    polygon: list[tuple[int, int]],
+) -> Image.Image | None:
+    if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS or not polygon:
         return None
+    xs = [point[0] for point in polygon]
+    ys = [point[1] for point in polygon]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    region_mask = Image.new("L", image_size, 0)
+    region_draw = ImageDraw.Draw(region_mask)
+    if camera_id == "K901F":
+        split_y = (min_y + max_y) / 2.0
+        region_draw.rectangle((min_x, split_y, max_x, max_y), fill=255)
+    else:
+        split_x = (min_x + max_x) / 2.0
+        region_draw.rectangle((min_x, min_y, split_x, max_y), fill=255)
+    return region_mask
+
+
+def whc_big_foreground_detections(
+    camera_id: str,
+    detections: list[dict[str, Any]],
+    roi_mask: Image.Image,
+    image_size: tuple[int, int],
+    roi_area: int,
+) -> list[int]:
     if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS:
-        return occupancy_box
-    if detection["label"] not in WHC_FOREGROUND_LARGE_VEHICLE_LABELS:
-        return occupancy_box
+        return []
 
-    raw_box = clip_box_to_image(detection["box"], image_size)
-    if raw_box is None:
-        return occupancy_box
+    candidate_indices: list[int] = []
+    for index, detection in enumerate(detections):
+        if detection["label"] not in WHC_FOREGROUND_LARGE_VEHICLE_LABELS:
+            continue
+        if box_roi_share(detection["box"], roi_mask, image_size, roi_area) < WHC_BIG_BOX_MIN_ROI_SHARE:
+            continue
+        candidate_indices.append(index)
 
-    center_y = (raw_box["ymin"] + raw_box["ymax"]) / 2.0
-    image_area = max(image_size[0] * image_size[1], 1)
-    raw_area = max((raw_box["xmax"] - raw_box["xmin"]) * (raw_box["ymax"] - raw_box["ymin"]), 1)
-    if center_y / max(image_size[1], 1) < WHC_FOREGROUND_MIN_VERTICAL_RATIO:
-        return occupancy_box
-    if raw_area / image_area < WHC_FOREGROUND_MIN_IMAGE_AREA_RATIO:
-        return occupancy_box
-
-    shrunk_box = shrink_box(occupancy_box, WHC_OCCUPANCY_BOX_SHRINK_FACTOR, image_size)
-    return shrunk_box if shrunk_box is not None else occupancy_box
+    return candidate_indices if 1 <= len(candidate_indices) <= WHC_FOREGROUND_MAX_BIG_VEHICLES else []
 
 
 def compute_road_occupancy(
@@ -419,16 +429,32 @@ def compute_road_occupancy(
     if image is not None:
         roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
+            foreground_mask = whc_foreground_mask(camera_id, image.size, polygon)
+            big_foreground_indices = set(
+                whc_big_foreground_detections(
+                    camera_id,
+                    on_road_detections,
+                    roi_mask,
+                    image.size,
+                    roi_area,
+                )
+            )
             vehicle_mask = Image.new("L", image.size, 0)
-            vehicle_draw = ImageDraw.Draw(vehicle_mask)
-            for detection in on_road_detections:
-                box = adjusted_occupancy_box(camera_id, detection, image.size)
+            for index, detection in enumerate(on_road_detections):
+                box = expand_box_for_occupancy(detection["box"], image.size)
                 if box is None:
                     continue
-                vehicle_draw.rectangle(
+                detection_mask = Image.new("L", image.size, 0)
+                detection_draw = ImageDraw.Draw(detection_mask)
+                detection_draw.rectangle(
                     (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
                     fill=255,
                 )
+                if index in big_foreground_indices and foreground_mask is not None:
+                    effective_mask = ImageChops.multiply(detection_mask, foreground_mask)
+                else:
+                    effective_mask = detection_mask
+                vehicle_mask = ImageChops.lighter(vehicle_mask, effective_mask)
             covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
             bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
             return round(bbox_occupancy_ratio, 3)
