@@ -40,6 +40,12 @@ TREND_BUCKET_SECONDS = 5 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
+ROI_MIN_BOX_OVERLAP_RATIO = 0.40
+WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
+WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
+WHC_FOREGROUND_MIN_VERTICAL_RATIO = 0.58
+WHC_FOREGROUND_MIN_IMAGE_AREA_RATIO = 0.025
+WHC_OCCUPANCY_BOX_SHRINK_FACTOR = 0.72
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
@@ -69,9 +75,9 @@ DEFAULT_BASELINE_SPEED_KMH = {
     "Western Harbour Crossing": 60.0,
 }
 FLOW_STATE_LOAD_THRESHOLDS = {
-    "busy_but_moving": 0.30,
-    "slowing": 0.55,
-    "congested": 0.80,
+    "busy_but_moving": 0.45,
+    "slowing": 0.70,
+    "congested": 0.88,
 }
 FLOW_SPEED_FACTORS = {
     "Clear": 1.0,
@@ -323,7 +329,84 @@ def get_camera_flow_history(camera_id: str, current_bucket: int | None = None) -
     return [entry for entry in history if entry["timestamp"] < current_bucket]
 
 
+def build_roi_mask(
+    image_size: tuple[int, int],
+    polygon: list[tuple[int, int]],
+) -> tuple[Image.Image, int]:
+    roi_mask = Image.new("L", image_size, 0)
+    roi_draw = ImageDraw.Draw(roi_mask)
+    roi_draw.polygon(polygon, fill=255)
+    roi_area = sum(roi_mask.histogram()[1:])
+    return roi_mask, roi_area
+
+
+def box_overlap_ratio_in_roi(
+    box: dict[str, float],
+    roi_mask: Image.Image,
+    image_size: tuple[int, int],
+) -> float:
+    clipped_box = clip_box_to_image(box, image_size)
+    if clipped_box is None:
+        return 0.0
+    box_area = max((clipped_box["xmax"] - clipped_box["xmin"]) * (clipped_box["ymax"] - clipped_box["ymin"]), 1)
+    overlap_crop = roi_mask.crop(
+        (clipped_box["xmin"], clipped_box["ymin"], clipped_box["xmax"], clipped_box["ymax"])
+    )
+    overlap_area = sum(overlap_crop.histogram()[1:])
+    return overlap_area / box_area
+
+
+def shrink_box(
+    box: dict[str, int],
+    shrink_factor: float,
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    center_x = (box["xmin"] + box["xmax"]) / 2.0
+    center_y = (box["ymin"] + box["ymax"]) / 2.0
+    half_width = (box["xmax"] - box["xmin"]) * shrink_factor / 2.0
+    half_height = (box["ymax"] - box["ymin"]) * shrink_factor / 2.0
+    return clip_box_to_image(
+        {
+            "xmin": center_x - half_width,
+            "ymin": center_y - half_height,
+            "xmax": center_x + half_width,
+            "ymax": center_y + half_height,
+        },
+        image_size,
+    )
+
+
+def adjusted_occupancy_box(
+    camera_id: str,
+    detection: dict[str, Any],
+    image_size: tuple[int, int],
+) -> dict[str, int] | None:
+    occupancy_box = expand_box_for_occupancy(detection["box"], image_size)
+    if occupancy_box is None:
+        return None
+    if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS:
+        return occupancy_box
+    if detection["label"] not in WHC_FOREGROUND_LARGE_VEHICLE_LABELS:
+        return occupancy_box
+
+    raw_box = clip_box_to_image(detection["box"], image_size)
+    if raw_box is None:
+        return occupancy_box
+
+    center_y = (raw_box["ymin"] + raw_box["ymax"]) / 2.0
+    image_area = max(image_size[0] * image_size[1], 1)
+    raw_area = max((raw_box["xmax"] - raw_box["xmin"]) * (raw_box["ymax"] - raw_box["ymin"]), 1)
+    if center_y / max(image_size[1], 1) < WHC_FOREGROUND_MIN_VERTICAL_RATIO:
+        return occupancy_box
+    if raw_area / image_area < WHC_FOREGROUND_MIN_IMAGE_AREA_RATIO:
+        return occupancy_box
+
+    shrunk_box = shrink_box(occupancy_box, WHC_OCCUPANCY_BOX_SHRINK_FACTOR, image_size)
+    return shrunk_box if shrunk_box is not None else occupancy_box
+
+
 def compute_road_occupancy(
+    camera_id: str,
     image: Image.Image | None,
     polygon: list[tuple[int, int]],
     on_road_detections: list[dict[str, Any]],
@@ -334,15 +417,12 @@ def compute_road_occupancy(
         return 0.0
 
     if image is not None:
-        roi_mask = Image.new("L", image.size, 0)
-        roi_draw = ImageDraw.Draw(roi_mask)
-        roi_draw.polygon(polygon, fill=255)
-        roi_area = sum(roi_mask.histogram()[1:])
+        roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
             vehicle_mask = Image.new("L", image.size, 0)
             vehicle_draw = ImageDraw.Draw(vehicle_mask)
             for detection in on_road_detections:
-                box = expand_box_for_occupancy(detection["box"], image.size)
+                box = adjusted_occupancy_box(camera_id, detection, image.size)
                 if box is None:
                     continue
                 vehicle_draw.rectangle(
@@ -536,99 +616,6 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
 
     return detections
 
-def point_in_polygon(point: tuple[float, float], polygon: list[tuple[int, int]]) -> bool:
-    x, y = point
-    inside = False
-    point_count = len(polygon)
-
-    for index in range(point_count):
-        x1, y1 = polygon[index]
-        x2, y2 = polygon[(index + 1) % point_count]
-        intersects = ((y1 > y) != (y2 > y)) and (
-            x < (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-9) + x1
-        )
-        if intersects:
-            inside = not inside
-
-    return inside
-
-
-def point_in_box(point: tuple[float, float], box: dict[str, float]) -> bool:
-    x, y = point
-    return box["xmin"] <= x <= box["xmax"] and box["ymin"] <= y <= box["ymax"]
-
-
-def polygon_edges(polygon: list[tuple[int, int]]) -> list[tuple[tuple[int, int], tuple[int, int]]]:
-    return [
-        (polygon[index], polygon[(index + 1) % len(polygon)])
-        for index in range(len(polygon))
-    ]
-
-
-def segments_intersect(
-    start_a: tuple[int, int],
-    end_a: tuple[int, int],
-    start_b: tuple[int, int],
-    end_b: tuple[int, int],
-) -> bool:
-    def orientation(p: tuple[int, int], q: tuple[int, int], r: tuple[int, int]) -> int:
-        value = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
-        if value == 0:
-            return 0
-        return 1 if value > 0 else 2
-
-    def on_segment(p: tuple[int, int], q: tuple[int, int], r: tuple[int, int]) -> bool:
-        return (
-            min(p[0], r[0]) <= q[0] <= max(p[0], r[0])
-            and min(p[1], r[1]) <= q[1] <= max(p[1], r[1])
-        )
-
-    orientation_1 = orientation(start_a, end_a, start_b)
-    orientation_2 = orientation(start_a, end_a, end_b)
-    orientation_3 = orientation(start_b, end_b, start_a)
-    orientation_4 = orientation(start_b, end_b, end_a)
-
-    if orientation_1 != orientation_2 and orientation_3 != orientation_4:
-        return True
-
-    if orientation_1 == 0 and on_segment(start_a, start_b, end_a):
-        return True
-    if orientation_2 == 0 and on_segment(start_a, end_b, end_a):
-        return True
-    if orientation_3 == 0 and on_segment(start_b, start_a, end_b):
-        return True
-    if orientation_4 == 0 and on_segment(start_b, end_a, end_b):
-        return True
-
-    return False
-
-
-def box_intersects_polygon(box: dict[str, float], polygon: list[tuple[int, int]]) -> bool:
-    box_corners = [
-        (box["xmin"], box["ymin"]),
-        (box["xmax"], box["ymin"]),
-        (box["xmax"], box["ymax"]),
-        (box["xmin"], box["ymax"]),
-    ]
-    if any(point_in_polygon(corner, polygon) for corner in box_corners):
-        return True
-    if any(point_in_box(point, box) for point in polygon):
-        return True
-
-    box_edges = [
-        (box_corners[0], box_corners[1]),
-        (box_corners[1], box_corners[2]),
-        (box_corners[2], box_corners[3]),
-        (box_corners[3], box_corners[0]),
-    ]
-    roi_edges = polygon_edges(polygon)
-    return any(
-        segments_intersect(box_start, box_end, roi_start, roi_end)
-        for box_start, box_end in box_edges
-        for roi_start, roi_end in roi_edges
-    )
-
-
 def clip_box_to_image(
     box: dict[str, float],
     image_size: tuple[int, int],
@@ -671,14 +658,19 @@ def roi_for_camera(camera_id: str) -> list[tuple[int, int]]:
 def filter_detections_to_road(
     detections: list[dict[str, Any]],
     polygon: list[tuple[int, int]],
+    image_size: tuple[int, int] | None,
 ) -> list[dict[str, Any]]:
-    if not polygon:
+    if not polygon or image_size is None:
+        return []
+
+    roi_mask, roi_area = build_roi_mask(image_size, polygon)
+    if roi_area <= 0:
         return []
 
     return [
         detection
         for detection in detections
-        if box_intersects_polygon(detection["box"], polygon)
+        if box_overlap_ratio_in_roi(detection["box"], roi_mask, image_size) >= ROI_MIN_BOX_OVERLAP_RATIO
     ]
 
 
@@ -1184,10 +1176,15 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 all_vehicle_count = len(all_detections)
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
-                on_road_detections = filter_detections_to_road(all_detections, polygon)
+                on_road_detections = filter_detections_to_road(
+                    all_detections,
+                    polygon,
+                    image.size if image is not None else None,
+                )
                 on_road_vehicle_count = len(on_road_detections)
                 road_occupancy = (
                     compute_road_occupancy(
+                        camera_id=camera_id,
                         image=image,
                         polygon=polygon,
                         on_road_detections=on_road_detections,
