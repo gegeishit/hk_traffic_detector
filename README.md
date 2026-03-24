@@ -89,7 +89,8 @@ Fallback behavior:
 - if live XML speed is unavailable, the app falls back to `60 km/h`
 
 Current key constants:
-- detector confidence threshold: `0.40`
+- detector confidence threshold: `0.25`
+- detector NMS IoU threshold: `0.50`
 - auto refresh: `300 seconds (5 minutes)`
 - tunnel lengths:
   - CHT: `1.86 km`
