@@ -49,7 +49,7 @@ WHC_BIG_BOX_MIN_ROI_SHARE = 0.08
 WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT = 30
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
-SERVICE_CHECK_MODEL_ID = "google/siglip-base-patch16-224"
+SERVICE_CHECK_MODEL_ID = "openai/clip-vit-base-patch32"
 SERVICE_SCREEN_LABELS = {
     "a yellow no service warning screen": True,
     "a service unavailable placeholder screen": True,
