@@ -28,21 +28,28 @@ STREAMLIT_FRAGMENT = getattr(st, "fragment", None)
 
 st.set_page_config(page_title="Hong Kong Tunnel Traffic Monitor", page_icon="🚗", layout="wide")
 
-# Runtime, caching, and model settings.
+# Keep requests short so the app does not hang on slow feeds.
 REQUEST_TIMEOUT_SECONDS = 10
+# Cache live feeds briefly to reduce repeat downloads during reruns.
 IMAGE_CACHE_TTL_SECONDS = 60
 DETECTOR_FEED_CACHE_TTL_SECONDS = 60
+# Refresh the dashboard every 5 minutes.
 AUTO_REFRESH_INTERVAL_MS = 300_000
+# Detector threshold for keeping a predicted vehicle box.
 DETECTOR_CONFIDENCE_THRESHOLD = 0.60
 DETECTOR_MODEL_ID = "Gegeishit/yolos-small-hk-traffic-cctv-finetuned"
+# The timeline shows the last 4 hours in 5-minute buckets.
 TREND_WINDOW_SECONDS = 4 * 60 * 60
 TREND_CHART_WINDOW_SECONDS = 4 * 60 * 60
 TREND_BUCKET_SECONDS = 5 * 60
 PERSISTED_HISTORY_PATH = Path(".streamlit/traffic_history.json")
 STYLESHEET_PATH = Path("styles.css")
+# Expand each box slightly so occupancy reflects car spacing, not just raw box size.
 OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
+# Count a detection as "in the road" only if at least 40% of its box overlaps the ROI.
 ROI_MIN_BOX_OVERLAP_RATIO = 0.40
+# These settings soften the impact of large near-camera WHC buses and trucks.
 WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
 WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
 WHC_FOREGROUND_MAX_BIG_VEHICLES = 2
@@ -51,6 +58,7 @@ WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT = 30
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
 SERVICE_CHECK_MODEL_ID = "openai/clip-vit-base-patch32"
+# The zero-shot classifier decides whether an image is a real road view or a placeholder screen.
 SERVICE_SCREEN_LABELS = {
     "a yellow no service warning screen": True,
     "a service unavailable placeholder screen": True,
@@ -63,7 +71,6 @@ DETECTOR_VEHICLE_LABELS = {
     "motorcycle",
     "truck",
 }
-# UI colors for the detector overlay.
 ANNOTATION_COLORS = {
     "car": (0, 240, 255),
     "bus": (255, 214, 10),
@@ -72,23 +79,26 @@ ANNOTATION_COLORS = {
 }
 ANNOTATION_BOX_ALPHA = 235
 
-# Traffic-state and ETA tuning constants.
+# Use this fallback speed only when the live XML speed is unavailable.
 DEFAULT_BASELINE_SPEED_KMH = {
     "Cross Harbour Tunnel": 60.0,
     "Eastern Harbour Crossing": 60.0,
     "Western Harbour Crossing": 60.0,
 }
+# Road occupancy is converted into user-facing traffic states using these cutoffs.
 FLOW_STATE_LOAD_THRESHOLDS = {
     "busy_but_moving": 0.45,
     "slowing": 0.70,
     "congested": 0.88,
 }
+# Camera-derived traffic state applies only a mild correction to the official speed baseline.
 FLOW_SPEED_FACTORS = {
     "Clear": 1.0,
     "Busy but moving": 0.95,
     "Slowing": 0.85,
     "Congested": 0.70,
 }
+# Fixed tunnel lengths are used to convert speed into estimated crossing time.
 TUNNEL_LENGTHS_KM = {
     "Cross Harbour Tunnel": 1.86,
     "Eastern Harbour Crossing": 2.2,
@@ -99,6 +109,7 @@ TUNNEL_SPEED_LIMITS_KMH = {
     "Eastern Harbour Crossing": 70.0,
     "Western Harbour Crossing": 70.0,
 }
+# Each tunnel side maps to one official road-network segment in the XML speed feed.
 BASELINE_SEGMENT_IDS = {
     "Cross Harbour Tunnel": {
         "Hong Kong": "2905",
@@ -115,7 +126,7 @@ BASELINE_SEGMENT_IDS = {
 }
 HONG_KONG_TZ = ZoneInfo("Asia/Hong_Kong")
 
-# Camera feeds and tunnel metadata.
+# Camera feed URLs are grouped by logical tunnel side.
 CAMERA_SOURCE_URLS = {
     "K107F-KL2HK": "https://tdcctv.data.one.gov.hk/K107F.JPG",
     "K107F-HK2KL": "https://tdcctv.data.one.gov.hk/K107F.JPG",
@@ -138,6 +149,7 @@ TUNNEL_LOGO_PATHS = {
     "Western Harbour Crossing": "images/WHC.avif",
 }
 
+# This structure controls how the UI groups cameras under tunnels and directions.
 TUNNELS = {
     "Cross Harbour Tunnel": {
         "Kowloon": ["K107F-KL2HK"],
@@ -166,19 +178,19 @@ ROAD_ROIS = {
 
 
 def init_session_state() -> None:
-    """Load persisted history into the current Streamlit session once."""
+    # Restore saved chart history only once per browser session.
     persisted_history = load_persisted_history()
     if "traffic_status_history" not in st.session_state:
         st.session_state.traffic_status_history = persisted_history.get("traffic_status_history", [])
 
 
 def prune_history_rows(history: list[dict[str, Any]], cutoff: int) -> list[dict[str, Any]]:
-    """Keep only history rows that are still inside the rolling time window."""
+    # The timeline is rolling, so old rows outside the window are dropped.
     return [row for row in history if int(row.get("timestamp", 0)) >= cutoff]
 
 
 def load_persisted_history() -> dict[str, Any]:
-    """Read saved chart history from disk and drop expired rows."""
+    # Load saved tunnel-status history from disk so the timeline survives app reruns.
     if not PERSISTED_HISTORY_PATH.exists():
         return {}
 
@@ -195,7 +207,7 @@ def load_persisted_history() -> dict[str, Any]:
 
 
 def persist_history() -> None:
-    """Write the current in-memory chart history back to disk."""
+    # Persist only the recent history window that is still relevant to the chart.
     cutoff = bucket_timestamp(datetime.now().timestamp()) - TREND_WINDOW_SECONDS
     payload = {
         "traffic_status_history": prune_history_rows(
@@ -214,7 +226,7 @@ def persist_history() -> None:
 
 
 def load_stylesheet() -> str:
-    """Load the external CSS file used by the Streamlit UI."""
+    # Keep CSS outside Python so UI styling is easier to maintain.
     try:
         return STYLESHEET_PATH.read_text(encoding="utf-8")
     except OSError:
@@ -223,7 +235,7 @@ def load_stylesheet() -> str:
 
 @st.cache_resource(show_spinner="Loading service-screen classifier...")
 def load_service_screen_classifier() -> tuple[Any | None, str | None]:
-    """Load the image classifier that filters out service-unavailable CCTV screens."""
+    # Load the classifier that screens out "service unavailable" camera frames.
     try:
         return (
             pipeline(
@@ -240,7 +252,7 @@ def load_service_screen_classifier() -> tuple[Any | None, str | None]:
 
 @st.cache_resource(show_spinner="Loading Conditional DETR detector...")
 def load_object_detector() -> tuple[Any | None, str | None]:
-    """Load the YOLOS object detector used for vehicle detection."""
+    # Load the Hugging Face object detector once and reuse it across reruns.
     try:
         processor = AutoImageProcessor.from_pretrained(DETECTOR_MODEL_ID, use_fast=False)
         model = AutoModelForObjectDetection.from_pretrained(
@@ -262,7 +274,7 @@ def load_object_detector() -> tuple[Any | None, str | None]:
 
 @st.cache_data(ttl=IMAGE_CACHE_TTL_SECONDS, show_spinner=False)
 def download_image_bytes(url: str) -> bytes:
-    """Download one camera snapshot as raw bytes."""
+    # Download one raw CCTV snapshot for a camera.
     response = requests.get(
         url,
         timeout=REQUEST_TIMEOUT_SECONDS,
@@ -274,7 +286,7 @@ def download_image_bytes(url: str) -> bytes:
 
 @st.cache_data(ttl=DETECTOR_FEED_CACHE_TTL_SECONDS, show_spinner=False)
 def download_segment_speed_xml() -> str:
-    """Download the official XML feed that provides average road-segment speed."""
+    # Download the official XML feed that contains live average traffic speeds.
     response = requests.get(
         TRAFFIC_SEGMENT_SPEED_XML_URL,
         timeout=REQUEST_TIMEOUT_SECONDS,
@@ -285,7 +297,7 @@ def download_segment_speed_xml() -> str:
 
 
 def fetch_image(url: str) -> Image.Image | None:
-    """Fetch one camera image and decode it into RGB format."""
+    # Convert downloaded bytes into a PIL image for classification, detection, and display.
     try:
         image_bytes = download_image_bytes(url)
         with Image.open(BytesIO(image_bytes)) as img:
@@ -295,7 +307,7 @@ def fetch_image(url: str) -> Image.Image | None:
 
 
 def parse_float(value: str | None) -> float | None:
-    """Convert a text value to float and return None if parsing fails."""
+    # XML parsing is safer when invalid values become None instead of throwing errors.
     if value is None:
         return None
     try:
@@ -305,12 +317,12 @@ def parse_float(value: str | None) -> float | None:
 
 
 def bucket_timestamp(timestamp: float) -> int:
-    """Round a Unix timestamp down to the nearest chart bucket."""
+    # The chart stores each snapshot in a fixed 5-minute bucket.
     return int(timestamp // TREND_BUCKET_SECONDS * TREND_BUCKET_SECONDS)
 
 
 def queue_state_to_band(label: str) -> int | None:
-    """Map a traffic-state label to the numeric band used by the timeline."""
+    # Altair uses numeric bands, so traffic labels are converted to simple integers.
     mapping = {
         "Clear": 0,
         "Busy but moving": 1,
@@ -321,7 +333,7 @@ def queue_state_to_band(label: str) -> int | None:
 
 
 def band_to_status_label(status_band: int) -> str:
-    """Map a numeric chart band back to its traffic-state label."""
+    # This reverses the numeric chart band back to a human-readable label.
     return {
         0: "Clear",
         1: "Busy but moving",
@@ -334,7 +346,7 @@ def build_roi_mask(
     image_size: tuple[int, int],
     polygon: list[tuple[int, int]],
 ) -> tuple[Image.Image, int]:
-    """Rasterize an ROI polygon into a mask and measure its pixel area."""
+    # The ROI mask is the base geometry used for overlap tests and occupancy math.
     roi_mask = Image.new("L", image_size, 0)
     roi_draw = ImageDraw.Draw(roi_mask)
     roi_draw.polygon(polygon, fill=255)
@@ -347,7 +359,7 @@ def box_overlap_ratio_in_roi(
     roi_mask: Image.Image,
     image_size: tuple[int, int],
 ) -> float:
-    """Measure what share of a box lies inside the ROI."""
+    # This measures how much of one detection box lies inside the road ROI.
     clipped_box = clip_box_to_image(box, image_size)
     if clipped_box is None:
         return 0.0
@@ -365,7 +377,7 @@ def box_roi_share(
     image_size: tuple[int, int],
     roi_area: int,
 ) -> float:
-    """Measure what share of the full ROI is covered by one box."""
+    # This measures how much of the full ROI is covered by one box.
     clipped_box = clip_box_to_image(box, image_size)
     if clipped_box is None or roi_area <= 0:
         return 0.0
@@ -381,7 +393,7 @@ def whc_foreground_mask(
     image_size: tuple[int, int],
     polygon: list[tuple[int, int]],
 ) -> Image.Image | None:
-    """Build the WHC foreground mask used to soften big near-camera vehicles."""
+    # WHC has perspective distortion, so we define a simple "foreground half" mask per camera.
     if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS or not polygon:
         return None
     xs = [point[0] for point in polygon]
@@ -407,7 +419,7 @@ def whc_big_foreground_detections(
     image_size: tuple[int, int],
     roi_area: int,
 ) -> list[int]:
-    """Find WHC bus/truck detections that are large enough to need correction."""
+    # Only a few large buses or trucks should trigger the WHC foreground correction.
     if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS:
         return []
 
@@ -430,14 +442,15 @@ def compute_road_occupancy(
     on_road_vehicle_count: int,
     detector_available: bool,
 ) -> float:
-    """Estimate road occupancy from padded box area divided by ROI area."""
+    # Core occupancy formula:
+    # road_occupancy = padded vehicle area inside ROI / total ROI area
     if not polygon or not detector_available or on_road_vehicle_count == 0:
         return 0.0
 
     if image is not None:
         roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
-            # Only apply the WHC foreground correction when the road already looks busy enough.
+            # Only correct near-camera WHC buses/trucks when the road is already reasonably busy.
             foreground_mask = None
             big_foreground_indices: set[int] = set()
             if on_road_vehicle_count >= WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT:
@@ -453,6 +466,7 @@ def compute_road_occupancy(
                 )
             vehicle_mask = Image.new("L", image.size, 0)
             for index, detection in enumerate(on_road_detections):
+                # Expand the box before occupancy is measured so the score reflects practical spacing.
                 box = expand_box_for_occupancy(detection["box"], image.size)
                 if box is None:
                     continue
@@ -463,11 +477,12 @@ def compute_road_occupancy(
                     fill=255,
                 )
                 if index in big_foreground_indices and foreground_mask is not None:
+                    # Limit corrected WHC vehicles to the foreground half only.
                     effective_mask = ImageChops.multiply(detection_mask, foreground_mask)
                 else:
                     effective_mask = detection_mask
                 vehicle_mask = ImageChops.lighter(vehicle_mask, effective_mask)
-            # The final score is the covered vehicle area divided by the full road ROI area.
+            # The final occupancy score is a normalized 0..1 ratio.
             covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
             bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
             return round(bbox_occupancy_ratio, 3)
@@ -478,7 +493,7 @@ def derive_camera_flow_state(
     on_road_vehicle_count: int,
     road_occupancy: float,
 ) -> str:
-    """Convert the occupancy score into a human-readable traffic state."""
+    # Road occupancy is translated into four user-facing traffic states.
     if on_road_vehicle_count == 0 or road_occupancy < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
         return "Clear"
     if road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
@@ -489,7 +504,7 @@ def derive_camera_flow_state(
 
 
 def load_segment_speed_map() -> tuple[dict[str, float], str | None]:
-    """Parse the XML speed feed into a segment_id -> km/h lookup table."""
+    # Turn the XML feed into a simple segment_id -> speed_kmh lookup table.
     try:
         xml_text = download_segment_speed_xml()
         root = ET.fromstring(xml_text)
@@ -520,7 +535,7 @@ def dynamic_baseline_seconds(
     side: str,
     speed_map: dict[str, float],
 ) -> tuple[int | None, str, float | None, float | None]:
-    """Build the live baseline crossing time from the official segment speed."""
+    # Use the official XML speed as the main ETA baseline for each tunnel side.
     segment_id = BASELINE_SEGMENT_IDS[tunnel][side]
     tunnel_length_km = TUNNEL_LENGTHS_KM[tunnel]
     speed_limit_kmh = TUNNEL_SPEED_LIMITS_KMH[tunnel]
@@ -534,7 +549,7 @@ def dynamic_baseline_seconds(
 
 
 def run_service_screen_check(img: Image.Image | None, classifier: Any | None) -> list[dict[str, Any]]:
-    """Run the zero-shot classifier on one image and return raw predictions."""
+    # Run the service-screen classifier and return its raw predictions.
     if img is None:
         return []
     if classifier is None:
@@ -554,7 +569,7 @@ def run_service_screen_check(img: Image.Image | None, classifier: Any | None) ->
 
 
 def detect_service_unavailable(img: Image.Image | None, classifier: Any | None) -> tuple[bool, str | None]:
-    """Decide whether a fetched image is a real road scene or a placeholder screen."""
+    # Mark a feed as unavailable only when the classifier is confident enough.
     predictions = run_service_screen_check(img, classifier)
     if not predictions:
         return False, None
@@ -570,12 +585,13 @@ def detect_service_unavailable(img: Image.Image | None, classifier: Any | None) 
 
 
 def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[str, Any]]:
-    """Run the object detector and return only supported vehicle classes."""
+    # Run object detection and keep only vehicle classes that matter to the traffic view.
     if img is None or detector is None:
         return []
 
     try:
         if isinstance(detector, dict) and detector.get("kind") == "hf_object_detector":
+            # For the Hugging Face model, post-process raw logits into image-scale boxes.
             processor = detector["processor"]
             model = detector["model"]
             model_device = next(model.parameters()).device
@@ -624,6 +640,7 @@ def detect_vehicles(img: Image.Image | None, detector: Any | None) -> list[dict[
 
     detections = []
     for result in results:
+        # Normalize every detection into one simple shared shape for later processing.
         try:
             label = str(result.get("label", "")).lower().strip()
             score = float(result.get("score", 0.0) or 0.0)
@@ -658,7 +675,7 @@ def clip_box_to_image(
     box: dict[str, float],
     image_size: tuple[int, int],
 ) -> dict[str, int] | None:
-    """Clip one detector box so it stays inside image bounds."""
+    # Clip a box to the image so downstream image math does not go out of bounds.
     image_width, image_height = image_size
     xmin = max(0, min(int(box["xmin"]), image_width - 1))
     ymin = max(0, min(int(box["ymin"]), image_height - 1))
@@ -673,7 +690,7 @@ def expand_box_for_occupancy(
     box: dict[str, float],
     image_size: tuple[int, int],
 ) -> dict[str, int] | None:
-    """Expand a detector box to reflect extra spacing around a vehicle."""
+    # Expand the raw box by a small margin before using it for occupancy math.
     clipped_box = clip_box_to_image(box, image_size)
     if clipped_box is None:
         return None
@@ -693,7 +710,7 @@ def expand_box_for_occupancy(
 
 
 def roi_for_camera(camera_id: str) -> list[tuple[int, int]]:
-    """Return the ROI polygon for a camera if it has been calibrated."""
+    # Empty or tiny polygons are treated as "not calibrated yet".
     polygon = ROAD_ROIS.get(camera_id, [])
     return polygon if len(polygon) >= 3 else []
 
@@ -703,7 +720,7 @@ def filter_detections_to_road(
     polygon: list[tuple[int, int]],
     image_size: tuple[int, int] | None,
 ) -> list[dict[str, Any]]:
-    """Keep only detections whose boxes overlap the road ROI enough to count."""
+    # A detection counts only when enough of its box lies inside the road ROI.
     if not polygon or image_size is None:
         return []
 
@@ -723,7 +740,7 @@ def annotate_image(
     display_detections: list[dict[str, Any]],
     roi_polygon: list[tuple[int, int]] | None = None,
 ) -> Image.Image | None:
-    """Draw the ROI outline and raw detector boxes for visual auditing."""
+    # The annotation image is for human auditing: ROI outline plus raw detector boxes.
     if img is None:
         return None
 
@@ -760,7 +777,7 @@ def annotate_image(
 
 
 def icon_for_flow_label(flow_label: str) -> str:
-    """Pick the UI icon that matches a traffic-state label."""
+    # Match each flow label to a simple status icon in the card UI.
     if flow_label in {"No data", "Uncalibrated", "No road data"}:
         return "❓"
     if flow_label == "Clear":
@@ -773,7 +790,7 @@ def icon_for_flow_label(flow_label: str) -> str:
 
 
 def side_direction_label(side: str) -> str:
-    """Convert the internal side key into a UI direction label."""
+    # Convert the internal tunnel-side key into the user-facing direction text.
     if side == "Hong Kong":
         return "HK → KL"
     if side == "Kowloon":
@@ -782,13 +799,13 @@ def side_direction_label(side: str) -> str:
 
 
 def ordered_sides(side_map: dict[str, Any]) -> list[str]:
-    """Keep tunnel sides in a consistent left-to-right display order."""
+    # Keep the tunnel-side layout stable instead of relying on dict insertion order.
     side_order = {"Kowloon": 0, "Hong Kong": 1}
     return sorted(side_map.keys(), key=lambda side: (side_order.get(side, 99), side))
 
 
 def format_duration(seconds: int | None) -> str:
-    """Format ETA seconds into a short minutes-and-seconds string."""
+    # Show ETA in a short format that is easy to scan in the card.
     if seconds is None:
         return "No data"
     minutes, remainder = divmod(max(int(seconds), 0), 60)
@@ -796,7 +813,7 @@ def format_duration(seconds: int | None) -> str:
 
 
 def fixed_baseline_seconds(tunnel: str) -> int:
-    """Build the fallback crossing time from the default tunnel speed."""
+    # This fallback is used only when live XML speed cannot be fetched.
     default_speed_kmh = DEFAULT_BASELINE_SPEED_KMH[tunnel]
     if default_speed_kmh <= 0:
         return 0
@@ -804,7 +821,7 @@ def fixed_baseline_seconds(tunnel: str) -> int:
 
 
 def baseline_caption(summary: dict[str, Any]) -> str:
-    """Show either live XML speed or fallback speed in the card caption."""
+    # Prefer showing the actual fetched speed; fall back only when live speed is unavailable.
     speed_kmh = (
         summary.get("fetched_speed_kmh")
         if summary.get("baseline_source") == "dynamic" and summary.get("fetched_speed_kmh") is not None
@@ -816,7 +833,7 @@ def baseline_caption(summary: dict[str, Any]) -> str:
 
 
 def render_side_badge(direction: str, status_icon: str) -> None:
-    """Render the small side badge shown at the top of each side card."""
+    # Render the small direction badge and colored state icon for one tunnel side.
     safe_direction = (
         direction.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     )
@@ -832,17 +849,17 @@ def render_side_badge(direction: str, status_icon: str) -> None:
 
 
 def camera_code_from_source_url(url: str) -> str:
-    """Extract the short camera code from a TD image URL."""
+    # The UI status line shows compact camera codes such as K107F or H702F.
     return url.rsplit("/", maxsplit=1)[-1].replace(".JPG", "")
 
 
 def camera_modal_id(camera_id: str) -> str:
-    """Build a safe HTML id for the image zoom modal."""
+    # Build a safe HTML id for the click-to-enlarge image modal.
     return camera_id.replace("/", "_").replace(".", "_")
 
 
 def image_to_data_uri(image: Image.Image | None) -> str | None:
-    """Encode a PIL image as a base64 data URI for inline HTML rendering."""
+    # Streamlit HTML blocks use base64 image URIs for hover and modal rendering.
     if image is None:
         return None
     buffer = BytesIO()
@@ -852,7 +869,7 @@ def image_to_data_uri(image: Image.Image | None) -> str | None:
 
 
 def render_hover_image(image: Image.Image | None, caption: str, modal_id: str) -> None:
-    """Render the tunnel snapshot card with hover and click-to-enlarge behavior."""
+    # Render the image card with hover hint and a full-size modal view.
     image_uri = image_to_data_uri(image)
     if image_uri is None:
         st.info("No image available.")
@@ -883,7 +900,7 @@ def render_hover_image(image: Image.Image | None, caption: str, modal_id: str) -
 
 
 def service_classifier_status(records_by_tunnel: dict[str, Any]) -> tuple[str, str]:
-    """Summarize whether any camera feeds are currently unavailable."""
+    # Summarize camera availability for the top status bar.
     unavailable_codes: list[str] = []
     for side_map in records_by_tunnel.values():
         for records in side_map.values():
@@ -914,7 +931,7 @@ def make_side_summary(
     estimated_crossing_seconds: int | None = None,
     road_occupancy: float | None = None,
 ) -> dict[str, Any]:
-    """Create the normalized summary object used by the UI for one tunnel side."""
+    # Standardize the shape of one side summary so the UI can render it consistently.
     return {
         "side": side,
         "direction": side_direction_label(side),
@@ -939,7 +956,7 @@ def summarize_side(
     detector_available: bool,
     detector_speed_map: dict[str, float],
 ) -> dict[str, Any]:
-    """Combine camera, occupancy, and speed data into one side-level summary."""
+    # This function turns raw camera records into the final side-level card output.
     available_records = [record for record in records if record["image"] is not None]
     analyzable_records = [record for record in available_records if record["analysis_enabled"]]
     calibrated_records = [record for record in analyzable_records if record["roi_configured"]]
@@ -987,7 +1004,9 @@ def summarize_side(
     current_load = float(primary_record["road_occupancy"])
     flow_label = str(primary_record["camera_flow_state"])
     base_speed_kmh = baseline_speed_kmh if baseline_speed_kmh is not None else default_speed_kmh
-    # ETA starts from the live XML speed, then applies a mild slowdown from the camera flow state.
+    # ETA formula:
+    # adjusted_speed = baseline_speed * flow_factor
+    # eta_seconds = tunnel_length / adjusted_speed * 3600
     adjusted_speed_kmh = (
         round(max(base_speed_kmh * FLOW_SPEED_FACTORS.get(flow_label, 1.0), 5.0), 1)
         if base_speed_kmh is not None and base_speed_kmh > 0
@@ -1008,7 +1027,7 @@ def summarize_side(
 
 
 def record_traffic_status_history(snapshot_time: float, tunnel_metrics: dict[str, Any]) -> None:
-    """Save one tunnel-level status snapshot into the rolling chart history."""
+    # Save one tunnel-level state per refresh so the 4-hour chart can be rebuilt later.
     bucketed_time = bucket_timestamp(snapshot_time)
 
     cutoff = bucketed_time - TREND_WINDOW_SECONDS
@@ -1042,7 +1061,7 @@ def record_traffic_status_history(snapshot_time: float, tunnel_metrics: dict[str
 
 
 def build_trend_dataframe(snapshot_time: float) -> pd.DataFrame:
-    """Convert saved history into a complete 5-minute grid for charting."""
+    # Build a complete time grid so the chart can show "No data" gaps explicitly.
     history = st.session_state.get("traffic_status_history", [])
     if not history:
         return pd.DataFrame()
@@ -1060,8 +1079,7 @@ def build_trend_dataframe(snapshot_time: float) -> pd.DataFrame:
     if "status_band" not in df.columns and "status_label" in df.columns:
         df["status_band"] = df["status_label"].map(queue_state_to_band)
 
-    # Always rebuild labels from the canonical band so legacy values such as
-    # "Building" are normalized to the current wording ("Slowing").
+    # Always rebuild labels from the canonical numeric band so wording stays consistent.
     df["status_label"] = df["status_band"].apply(
         lambda band: band_to_status_label(int(band)) if pd.notna(band) else None
     )
@@ -1084,7 +1102,7 @@ def build_trend_dataframe(snapshot_time: float) -> pd.DataFrame:
         on=["tunnel", "timestamp"],
         how="left",
     )
-    # Fill missing buckets so the chart shows explicit "No data" gaps.
+    # Missing buckets are shown as "No data" instead of being silently skipped.
     df["status_band"] = df["status_band"].fillna(-1)
     df["status_label"] = df["status_label"].fillna("No data")
     df["time_label"] = df["timestamp"].apply(
@@ -1094,7 +1112,7 @@ def build_trend_dataframe(snapshot_time: float) -> pd.DataFrame:
 
 
 def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, str]]:
-    """Run one full live-data cycle and return everything the UI needs."""
+    # This is the main live-data pipeline for one refresh cycle.
     service_classifier, service_classifier_error = load_service_screen_classifier()
     detector, detector_error = load_object_detector()
     detector_available = detector is not None
@@ -1110,7 +1128,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
             camera_records = []
 
             for camera_id in camera_ids:
-                # Camera images are fetched first, then tunnel speed is fetched once later in the cycle.
+                # Fetch images first so all camera views belong to the same refresh cycle.
                 source_url = CAMERA_SOURCE_URLS[camera_id]
                 image = fetch_image(source_url)
                 service_unavailable_detected, service_check_result = detect_service_unavailable(image, service_classifier)
@@ -1124,7 +1142,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     image.size if image is not None else None,
                 )
                 on_road_vehicle_count = len(on_road_detections)
-                # Occupancy is measured from padded box area inside the calibrated road polygon.
+                # Road occupancy is the image-derived congestion signal used by side flow.
                 road_occupancy = (
                     compute_road_occupancy(
                         camera_id=camera_id,
@@ -1147,6 +1165,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 )
                 annotated_image = image
                 if analysis_enabled and image is not None:
+                    # The displayed image uses the already filtered road detections.
                     annotated_image = annotate_image(
                         image,
                         on_road_detections,
@@ -1173,6 +1192,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
             side_records[side] = camera_records
         records_by_tunnel[tunnel] = side_records
 
+    # Fetch the official speed feed once after images are ready.
     detector_speed_map, detector_feed_error = load_segment_speed_map()
 
     for tunnel, side_records in records_by_tunnel.items():
@@ -1195,7 +1215,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
             for summary in side_summaries.values()
             if queue_state_to_band(summary["flow_label"]) is not None
         ]
-        # The tunnel-level timeline state is the rounded average of its side-level states.
+        # The timeline is tunnel-level, so side states are averaged and rounded into one tunnel state.
         trend_status_band = (
             int(round(sum(side_flow_bands) / len(side_flow_bands)))
             if side_flow_bands
@@ -1224,7 +1244,7 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
 
 
 def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_by_tunnel: dict[str, Any]) -> None:
-    """Render the app status bar and manual refresh button."""
+    # Show the global app status, any warnings, and the manual refresh button.
     with st.container(border=True):
         status_column, action_column = st.columns([4.8, 1.2], vertical_alignment="center")
         with status_column:
@@ -1266,6 +1286,7 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
                         st.code(f"{label}: {detail}", language="text")
         with action_column:
             if st.button("Refresh data", use_container_width=True, type="secondary"):
+                # Clear cached live feeds so the next rerun fetches fresh data immediately.
                 download_image_bytes.clear()
                 download_segment_speed_xml.clear()
                 if STREAMLIT_FRAGMENT is not None:
@@ -1275,7 +1296,7 @@ def render_top_bar(snapshot_time: float, model_errors: dict[str, str], records_b
 
 
 def render_trend_chart(snapshot_time: float) -> None:
-    """Render the 4-hour tunnel timeline chart with Altair."""
+    # Render the last 4 hours of tunnel-level traffic states as an Altair heatmap.
     st.subheader("Flow Timeline (Last 4 Hours)")
     st.caption("Live tunnel-status timeline in 5-minute blocks: Clear, Busy but moving, Slowing, Congested.")
 
@@ -1297,6 +1318,7 @@ def render_trend_chart(snapshot_time: float) -> None:
     tick_labels = time_order[::5] if len(time_order) > 5 else time_order
 
     chart = (
+        # Each rectangle is one tunnel status in one 5-minute time bucket.
         alt.Chart(trend_df)
         .mark_rect(
             cornerRadius=2,
@@ -1338,7 +1360,7 @@ def render_trend_chart(snapshot_time: float) -> None:
 
 
 def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tunnel_metrics: dict[str, Any]) -> None:
-    """Render the full dashboard view for the latest snapshot."""
+    # Render the whole page: header, status bar, timeline, and tunnel cards.
     stylesheet = load_stylesheet()
     if stylesheet:
         st.markdown(f"<style>{stylesheet}</style>", unsafe_allow_html=True)
@@ -1358,7 +1380,6 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
     )
 
     for tunnel, side_map in TUNNELS.items():
-        tunnel_status = tunnel_metrics[tunnel]
         side_order = ordered_sides(side_map)
         with st.container(border=True):
             logo_column, title_column = st.columns([0.08, 0.92], vertical_alignment="center")
@@ -1378,12 +1399,6 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                 with side_columns[index]:
                     summary = tunnel_metrics[tunnel]["sides"][side]
                     side_records = records_by_tunnel[tunnel][side]
-                    has_analyzable_side_record = any(
-                        record["image"] is not None
-                        and record["roi_configured"]
-                        and record["analysis_enabled"]
-                        for record in side_records
-                    )
                     primary_record = side_records[0] if side_records else None
                     info_column, image_column = st.columns([0.9, 1.1], vertical_alignment="top")
 
@@ -1432,7 +1447,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
 
 
 def render_live_dashboard_cycle() -> None:
-    """Run one refresh cycle, then update history and redraw the dashboard."""
+    # Run one full refresh, update history, and redraw the page.
     with st.spinner("Refreshing live traffic snapshot..."):
         snapshot_time, records_by_tunnel, tunnel_metrics, model_errors = build_snapshot()
     st.session_state["model_errors"] = model_errors
@@ -1441,6 +1456,7 @@ def render_live_dashboard_cycle() -> None:
 
 
 render_live_dashboard_fragment = (
+    # Prefer fragment refresh when Streamlit supports it; otherwise fall back to a normal rerun.
     STREAMLIT_FRAGMENT(run_every=AUTO_REFRESH_INTERVAL_MS / 1000)(render_live_dashboard_cycle)
     if STREAMLIT_FRAGMENT is not None
     else render_live_dashboard_cycle
@@ -1448,10 +1464,11 @@ render_live_dashboard_fragment = (
 
 
 def main() -> None:
-    """Initialize session state and start the live dashboard refresh flow."""
+    # Initialize state and start the live dashboard refresh flow.
     init_session_state()
 
     if STREAMLIT_FRAGMENT is None and st_autorefresh is not None:
+        # This fallback is used only on Streamlit versions that do not support fragments.
         st_autorefresh(interval=AUTO_REFRESH_INTERVAL_MS, key="live_dashboard_refresh")
 
     render_live_dashboard_fragment()
