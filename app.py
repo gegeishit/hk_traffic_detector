@@ -448,25 +448,17 @@ def compute_road_occupancy(
     return 0.0
 
 
-def derive_camera_flow_metrics(
-    camera_id: str,
-    snapshot_time: float,
+def derive_camera_flow_state(
     on_road_vehicle_count: int,
     road_occupancy: float,
-) -> dict[str, Any]:
+) -> str:
     if on_road_vehicle_count == 0 or road_occupancy < FLOW_STATE_LOAD_THRESHOLDS["busy_but_moving"]:
-        camera_flow_state = "Clear"
-    elif road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
-        camera_flow_state = "Congested"
-    elif road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
-        camera_flow_state = "Slowing"
-    else:
-        camera_flow_state = "Busy but moving"
-
-    return {
-        "persistent_high_count": 0,
-        "camera_flow_state": camera_flow_state,
-    }
+        return "Clear"
+    if road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["congested"]:
+        return "Congested"
+    if road_occupancy >= FLOW_STATE_LOAD_THRESHOLDS["slowing"]:
+        return "Slowing"
+    return "Busy but moving"
 
 
 def load_segment_speed_map() -> tuple[dict[str, float], str | None]:
@@ -1064,7 +1056,6 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                 service_unavailable_detected, service_check_result = detect_service_unavailable(image, service_classifier)
                 analysis_enabled = image is not None and not service_unavailable_detected
                 all_detections = detect_vehicles(image, detector) if analysis_enabled else []
-                all_vehicle_count = len(all_detections)
                 polygon = roi_for_camera(camera_id)
                 roi_configured = bool(polygon)
                 on_road_detections = filter_detections_to_road(
@@ -1085,15 +1076,14 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                     if analysis_enabled
                     else 0.0
                 )
-                camera_flow_metrics = derive_camera_flow_metrics(
-                    camera_id=camera_id,
-                    snapshot_time=snapshot_time,
-                    on_road_vehicle_count=on_road_vehicle_count,
-                    road_occupancy=road_occupancy,
-                ) if analysis_enabled else {
-                    "persistent_high_count": 0,
-                    "camera_flow_state": "N/A",
-                }
+                camera_flow_state = (
+                    derive_camera_flow_state(
+                        on_road_vehicle_count=on_road_vehicle_count,
+                        road_occupancy=road_occupancy,
+                    )
+                    if analysis_enabled
+                    else "N/A"
+                )
                 annotated_image = image
                 if analysis_enabled and image is not None:
                     annotated_image = annotate_image(
@@ -1113,11 +1103,9 @@ def build_snapshot() -> tuple[float, dict[str, Any], dict[str, Any], dict[str, s
                         "analysis_enabled": analysis_enabled,
                         "service_unavailable_detected": service_unavailable_detected,
                         "service_check_result": service_check_result,
-                        "all_vehicle_count": all_vehicle_count,
-                        "on_road_vehicle_count": on_road_vehicle_count,
                         "road_occupancy": road_occupancy,
                         "roi_configured": roi_configured,
-                        **camera_flow_metrics,
+                        "camera_flow_state": camera_flow_state,
                     }
                 )
 
@@ -1347,7 +1335,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             st.caption(baseline_caption(summary))
 
                         if primary_record is None or primary_record["image"] is None:
-                            st.write("**Side flow:** N/A  \n**All vehicles detected:** N/A  \n**Vehicles in ROI:** N/A")
+                            st.write("**Side flow:** N/A  \n**Road occupancy:** N/A")
                         elif not primary_record["roi_configured"]:
                             st.info("ROI not configured; excluded from road-flow calculation.")
                         elif not primary_record["analysis_enabled"]:
@@ -1363,9 +1351,7 @@ def render_dashboard(snapshot_time: float, records_by_tunnel: dict[str, Any], tu
                             )
                             st.markdown(
                                 f"**Side flow:** {primary_record['camera_flow_state']}  \n"
-                                f"**Road occupancy:** {road_occupancy_text}  \n"
-                                f"**All vehicles detected:** {primary_record['all_vehicle_count']}  \n"
-                                f"**Vehicles in ROI:** {primary_record['on_road_vehicle_count']}"
+                                f"**Road occupancy:** {road_occupancy_text}"
                             )
 
                     with image_column:
