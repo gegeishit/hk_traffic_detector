@@ -50,6 +50,7 @@ OCCUPANCY_BOX_PADDING_MIN_PX = 4
 # Count a detection as "in the road" only if at least 40% of its box overlaps the ROI.
 ROI_MIN_BOX_OVERLAP_RATIO = 0.40
 # These settings soften the impact of large near-camera WHC buses and trucks.
+# The correction is only allowed when the ROI still looks relatively light.
 WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
 WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
 WHC_FOREGROUND_MAX_BIG_VEHICLES = 2
@@ -459,10 +460,10 @@ def compute_road_occupancy(
     if image is not None:
         roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
-            # Only correct near-camera WHC buses/trucks when the road is already reasonably busy.
+            # Only correct near-camera WHC buses/trucks when the road is still relatively light.
             foreground_mask = None
             big_foreground_indices: set[int] = set()
-            if on_road_vehicle_count >= WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT:
+            if on_road_vehicle_count < WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT:
                 foreground_mask = whc_foreground_mask(camera_id, image.size, polygon)
                 big_foreground_indices = set(
                     whc_big_foreground_detections(

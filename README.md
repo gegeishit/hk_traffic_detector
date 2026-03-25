@@ -71,7 +71,7 @@ road_occupancy = covered_padded_bounding_box_area_inside_roi / roi_area
 ```
 
 `road_occupancy` is kept internally as a `0..1` float and displayed in the UI as a percentage.
-The occupancy score uses padded detector rectangles, while the visible annotation boxes remain the raw detector boxes. A detection only counts as being in the road ROI if at least `40%` of its bounding box lies inside the ROI. For Western Harbour Crossing, if one or two large buses or trucks dominate the ROI and the ROI already contains at least `30` vehicles, their effective occupancy is limited to a fixed foreground half of the road area so that near-camera vehicles do not overstate congestion.
+The occupancy score uses padded detector rectangles, while the visible annotation boxes remain the raw detector boxes. A detection only counts as being in the road ROI if at least `40%` of its bounding box lies inside the ROI. For Western Harbour Crossing, if one or two large buses or trucks dominate the ROI while the ROI still contains fewer than `30` vehicles, their effective occupancy is limited to a fixed foreground half of the road area so that near-camera vehicles do not overstate congestion.
 
 Traffic-state bands:
 - `Clear`: load `< 0.45`
