@@ -49,12 +49,12 @@ OCCUPANCY_BOX_PADDING_RATIO = 0.12
 OCCUPANCY_BOX_PADDING_MIN_PX = 4
 # Count a detection as "in the road" only if at least 40% of its box overlaps the ROI.
 ROI_MIN_BOX_OVERLAP_RATIO = 0.40
-# These settings soften the impact of large near-camera WHC buses and trucks.
+# These settings soften the impact of dominant near-camera WHC vehicles.
 # The correction is only allowed when the ROI still looks relatively light.
 WHC_PERSPECTIVE_CAMERA_IDS = {"H702F", "K901F"}
-WHC_FOREGROUND_LARGE_VEHICLE_LABELS = {"bus", "truck"}
-WHC_FOREGROUND_MAX_BIG_VEHICLES = 2
-WHC_BIG_BOX_MIN_ROI_SHARE = 0.08
+WHC_FOREGROUND_MAX_WEIGHTED_VEHICLES = 3
+WHC_FOREGROUND_MIN_ROI_SHARE = 0.08
+WHC_FOREGROUND_WEIGHT_FACTOR = 0.5
 WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT = 30
 TRAFFIC_SEGMENT_SPEED_XML_URL = "https://resource.data.one.gov.hk/td/traffic-detectors/irnAvgSpeed-all.xml"
 TRAFFIC_SEGMENT_SPEED_HEADERS = {"User-Agent": "hk-traffic-monitor/1.0"}
@@ -385,7 +385,7 @@ def box_roi_share(
     roi_area: int,
 ) -> float:
     # Measure how much of the full ROI is covered by one detection box.
-    # This helps identify overly dominant foreground buses or trucks on WHC.
+    # This helps identify overly dominant foreground vehicles on WHC.
     clipped_box = clip_box_to_image(box, image_size)
     if clipped_box is None or roi_area <= 0:
         return 0.0
@@ -402,7 +402,7 @@ def whc_foreground_mask(
     polygon: list[tuple[int, int]],
 ) -> Image.Image | None:
     # Build a simple foreground region for Western Harbour Crossing cameras.
-    # This region is used to reduce the effect of large near-camera vehicles on occupancy.
+    # This region is used to find near-camera vehicles whose occupancy should be down-weighted.
     if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS or not polygon:
         return None
     xs = [point[0] for point in polygon]
@@ -421,27 +421,28 @@ def whc_foreground_mask(
     return region_mask
 
 
-def whc_big_foreground_detections(
+def whc_weighted_foreground_detections(
     camera_id: str,
     detections: list[dict[str, Any]],
     roi_mask: Image.Image,
+    foreground_mask: Image.Image | None,
     image_size: tuple[int, int],
     roi_area: int,
 ) -> list[int]:
-    # Find WHC buses or trucks that are large enough to distort occupancy unfairly.
-    # The correction is intentionally limited to one or two dominant foreground vehicles.
-    if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS:
+    # Find WHC foreground vehicles whose occupancy should count at half weight.
+    # The correction is intentionally limited to one to three dominant foreground vehicles.
+    if camera_id not in WHC_PERSPECTIVE_CAMERA_IDS or foreground_mask is None:
         return []
 
     candidate_indices: list[int] = []
     for index, detection in enumerate(detections):
-        if detection["label"] not in WHC_FOREGROUND_LARGE_VEHICLE_LABELS:
+        if box_overlap_ratio_in_roi(detection["box"], foreground_mask, image_size) <= 0:
             continue
-        if box_roi_share(detection["box"], roi_mask, image_size, roi_area) < WHC_BIG_BOX_MIN_ROI_SHARE:
+        if box_roi_share(detection["box"], roi_mask, image_size, roi_area) <= WHC_FOREGROUND_MIN_ROI_SHARE:
             continue
         candidate_indices.append(index)
 
-    return candidate_indices if 1 <= len(candidate_indices) <= WHC_FOREGROUND_MAX_BIG_VEHICLES else []
+    return candidate_indices if 1 <= len(candidate_indices) <= WHC_FOREGROUND_MAX_WEIGHTED_VEHICLES else []
 
 
 def compute_road_occupancy(
@@ -460,41 +461,57 @@ def compute_road_occupancy(
     if image is not None:
         roi_mask, roi_area = build_roi_mask(image.size, polygon)
         if roi_area > 0:
-            # Only correct near-camera WHC buses/trucks when the road is still relatively light.
+            # Only correct near-camera WHC vehicles when the road is still relatively light.
             foreground_mask = None
-            big_foreground_indices: set[int] = set()
+            weighted_foreground_indices: set[int] = set()
             if on_road_vehicle_count < WHC_FOREGROUND_CORRECTION_MIN_ROI_COUNT:
                 foreground_mask = whc_foreground_mask(camera_id, image.size, polygon)
-                big_foreground_indices = set(
-                    whc_big_foreground_detections(
+                weighted_foreground_indices = set(
+                    whc_weighted_foreground_detections(
                         camera_id,
                         on_road_detections,
                         roi_mask,
+                        foreground_mask,
                         image.size,
                         roi_area,
                     )
                 )
-            vehicle_mask = Image.new("L", image.size, 0)
-            for index, detection in enumerate(on_road_detections):
-                # Expand the box before occupancy is measured so the score reflects practical spacing.
-                box = expand_box_for_occupancy(detection["box"], image.size)
-                if box is None:
-                    continue
-                detection_mask = Image.new("L", image.size, 0)
-                detection_draw = ImageDraw.Draw(detection_mask)
-                detection_draw.rectangle(
-                    (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
-                    fill=255,
-                )
-                if index in big_foreground_indices and foreground_mask is not None:
-                    # Limit corrected WHC vehicles to the foreground half only.
-                    effective_mask = ImageChops.multiply(detection_mask, foreground_mask)
-                else:
-                    effective_mask = detection_mask
-                vehicle_mask = ImageChops.lighter(vehicle_mask, effective_mask)
-            # The final occupancy score is a normalized 0..1 ratio.
-            covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
-            bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
+            if weighted_foreground_indices:
+                # When the WHC weighting rule triggers, sum each vehicle's ROI area contribution directly.
+                # Qualifying foreground vehicles count at 50% so near-camera boxes do not overstate congestion.
+                weighted_vehicle_area = 0.0
+                for index, detection in enumerate(on_road_detections):
+                    # Expand the box before occupancy is measured so the score reflects practical spacing.
+                    box = expand_box_for_occupancy(detection["box"], image.size)
+                    if box is None:
+                        continue
+                    detection_mask = Image.new("L", image.size, 0)
+                    detection_draw = ImageDraw.Draw(detection_mask)
+                    detection_draw.rectangle(
+                        (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
+                        fill=255,
+                    )
+                    covered_vehicle_area = sum(ImageChops.multiply(detection_mask, roi_mask).histogram()[1:])
+                    weight = WHC_FOREGROUND_WEIGHT_FACTOR if index in weighted_foreground_indices else 1.0
+                    weighted_vehicle_area += covered_vehicle_area * weight
+                bbox_occupancy_ratio = min(max(weighted_vehicle_area / roi_area, 0.0), 1.0)
+            else:
+                vehicle_mask = Image.new("L", image.size, 0)
+                for detection in on_road_detections:
+                    # Expand the box before occupancy is measured so the score reflects practical spacing.
+                    box = expand_box_for_occupancy(detection["box"], image.size)
+                    if box is None:
+                        continue
+                    detection_mask = Image.new("L", image.size, 0)
+                    detection_draw = ImageDraw.Draw(detection_mask)
+                    detection_draw.rectangle(
+                        (box["xmin"], box["ymin"], box["xmax"], box["ymax"]),
+                        fill=255,
+                    )
+                    vehicle_mask = ImageChops.lighter(vehicle_mask, detection_mask)
+                # The default occupancy score remains a normalized union-area ratio.
+                covered_vehicle_area = sum(ImageChops.multiply(vehicle_mask, roi_mask).histogram()[1:])
+                bbox_occupancy_ratio = min(max(covered_vehicle_area / roi_area, 0.0), 1.0)
             return round(bbox_occupancy_ratio, 3)
     return 0.0
 
